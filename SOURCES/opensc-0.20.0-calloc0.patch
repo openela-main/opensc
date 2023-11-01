@@ -1,0 +1,102 @@
+From f1bcadfbe9d156adbe509b0860511ee41add0c67 Mon Sep 17 00:00:00 2001
+From: Frank Morgner <frankmorgner@gmail.com>
+Date: Tue, 10 Mar 2020 12:13:29 +0100
+Subject: [PATCH]  pkcs11: don't try to allocate 0 byte with calloc
+
+fixes #1978
+---
+ src/pkcs11/pkcs11-global.c | 7 ++++++-
+ win32/Make.rules.mak       | 4 ++--
+ win32/winconfig.h.in       | 2 ++
+ 3 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/pkcs11/pkcs11-global.c b/src/pkcs11/pkcs11-global.c
+index a3260314f8..671890309f 100644
+--- a/src/pkcs11/pkcs11-global.c
++++ b/src/pkcs11/pkcs11-global.c
+@@ -456,6 +456,13 @@ CK_RV C_GetSlotList(CK_BBOOL       tokenPresent,  /* only slots with token prese
+ 
+ 	card_detect_all();
+ 
++	if (list_empty(&virtual_slots)) {
++		sc_log(context, "returned 0 slots\n");
++		*pulCount = 0;
++		rv = CKR_OK;
++		goto out;
++	}
++
+ 	found = calloc(list_size(&virtual_slots), sizeof(CK_SLOT_ID));
+ 
+ 	if (found == NULL) {
+diff --git a/win32/Make.rules.mak b/win32/Make.rules.mak
+index 4f4971a72d..c6b1aac340 100644
+--- a/win32/Make.rules.mak
++++ b/win32/Make.rules.mak
+@@ -1,7 +1,7 @@
+ OPENSC_FEATURES = pcsc
+ 
+ #Include support for minidriver
+-MINIDRIVER_DEF = /DENABLE_MINIDRIVER
++#MINIDRIVER_DEF = /DENABLE_MINIDRIVER
+ 
+ #Build MSI with the Windows Installer XML (WIX) toolkit, requires WIX >= 3.9
+ !IF "$(WIX)" == ""
+@@ -33,7 +33,7 @@ WIX_LIBS = "$(WIX)\SDK\$(WIXVSVER)\lib\$(PLATFORM)\dutil.lib" "$(WIX)\SDK\$(WIXV
+ SM_DEF = /DENABLE_SM
+ 
+ #Build with debugging support
+-#DEBUG_DEF = /DDEBUG
++DEBUG_DEF = /DDEBUG
+ 
+ # If you want support for OpenSSL (needed for pkcs15-init tool, software hashing in PKCS#11 library and verification):
+ # - download and build OpenSSL
+diff --git a/win32/winconfig.h.in b/win32/winconfig.h.in
+index 94ed9b5475..fa682c5bcc 100644
+--- a/win32/winconfig.h.in
++++ b/win32/winconfig.h.in
+@@ -103,6 +103,8 @@
+ #define DEFAULT_ONEPIN_PKCS11_PROVIDER "@DEFAULT_ONEPIN_PKCS11_PROVIDER@"
+ #endif
+ 
++#define PKCS11_THREAD_LOCKING
++
+ #ifndef DEFAULT_SM_MODULE
+ #define DEFAULT_SM_MODULE "@DEFAULT_SM_MODULE@"
+ #endif
+
+commit 500ecd3d127975379e2310626c3ce94c3e7035ea
+Author: Jakub Jelen <jjelen@redhat.com>
+Date:   Wed Nov 25 13:49:08 2020 +0100
+
+    pkcs11-tool: Avoid calloc with 0 argument
+
+diff --git a/src/tools/pkcs11-tool.c b/src/tools/pkcs11-tool.c
+index 4015aaf1..89244795 100644
+--- a/src/tools/pkcs11-tool.c
++++ b/src/tools/pkcs11-tool.c
+@@ -1270,15 +1270,18 @@ static void list_slots(int tokens, int refresh, int print)
+ 		if (rv != CKR_OK)
+ 			p11_fatal("C_GetSlotList(NULL)", rv);
+ 		free(p11_slots);
+-		p11_slots = calloc(p11_num_slots, sizeof(CK_SLOT_ID));
+-		if (p11_slots == NULL) {
+-			perror("calloc failed");
+-			exit(1);
++		p11_slots = NULL;
++		if (p11_num_slots > 0) {
++			p11_slots = calloc(p11_num_slots, sizeof(CK_SLOT_ID));
++			if (p11_slots == NULL) {
++				perror("calloc failed");
++				exit(1);
++			}
++			rv = p11->C_GetSlotList(tokens, p11_slots, &p11_num_slots);
++			if (rv != CKR_OK)
++				p11_fatal("C_GetSlotList()", rv);
+ 		}
+ 
+-		rv = p11->C_GetSlotList(tokens, p11_slots, &p11_num_slots);
+-		if (rv != CKR_OK)
+-			p11_fatal("C_GetSlotList()", rv);
+ 	}
+ 
+ 	if (!print)

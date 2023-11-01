@@ -1,0 +1,102 @@
+diff --git a/src/libopensc/card-cac.c b/src/libopensc/card-cac.c
+index 099923e5..61e69c88 100644
+--- a/src/libopensc/card-cac.c
++++ b/src/libopensc/card-cac.c
+@@ -1793,7 +1793,7 @@ static int cac_find_and_initialize(sc_card_t *card, int initialize)
+ 		}
+ 		r = cac_process_ACA(card, priv);
+ 		if (r == SC_SUCCESS) {
+-			card->type = SC_CARD_TYPE_CAC_II;
++			card->type = SC_CARD_TYPE_CAC_ALT_HID;
+ 			card->drv_data = priv;
+ 			return r;
+ 		}
+@@ -1869,6 +1869,8 @@ static int cac_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries
+ 	 * FIPS 201 4.1.6.1 (numeric only) and * FIPS 140-2
+ 	 * (6 character minimum) requirements.
+ 	 */
++	sc_apdu_t apdu;
++	u8  sbuf[SC_MAX_APDU_BUFFER_SIZE];
+ 	struct sc_card_driver *iso_drv = sc_get_iso7816_driver();
+ 
+ 	if (data->cmd == SC_PIN_CMD_CHANGE) {
+@@ -1881,6 +1883,18 @@ static int cac_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries
+ 				return SC_ERROR_INVALID_DATA;
+ 			}
+ 		}
++
++		/* We can change the PIN of Giesecke & Devrient CAC ALT tokens
++		 * with a bit non-standard APDU */
++		if (card->type == SC_CARD_TYPE_CAC_ALT_HID) {
++			int r = 0;
++			r = iso7816_build_pin_apdu(card, &apdu, data, sbuf, sizeof(sbuf));
++			if (r < 0)
++				return r;
++			/* it requires P1 = 0x01 completely against the ISO specs */
++			apdu.p1 = 0x01;
++			data->apdu = &apdu;
++		}
+ 	}
+ 
+ 	return  iso_drv->ops->pin_cmd(card, data, tries_left);
+diff --git a/src/libopensc/cards.h b/src/libopensc/cards.h
+index 0ec25a46..16846d15 100644
+--- a/src/libopensc/cards.h
++++ b/src/libopensc/cards.h
+@@ -244,6 +244,7 @@ enum {
+ 	SC_CARD_TYPE_CAC_GENERIC,
+ 	SC_CARD_TYPE_CAC_I,
+ 	SC_CARD_TYPE_CAC_II,
++	SC_CARD_TYPE_CAC_ALT_HID,
+ 
+ 	/* nPA cards */
+ 	SC_CARD_TYPE_NPA = 34000,
+diff --git a/src/libopensc/iso7816.c b/src/libopensc/iso7816.c
+index b1a0e88f..d41613b2 100644
+--- a/src/libopensc/iso7816.c
++++ b/src/libopensc/iso7816.c
+@@ -1017,7 +1017,7 @@ iso7816_decipher(struct sc_card *card,
+ }
+ 
+ 
+-static int
++int
+ iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
+ 		struct sc_pin_cmd_data *data, u8 *buf, size_t buf_len)
+ {
+diff --git a/src/libopensc/opensc.h b/src/libopensc/opensc.h
+index b519c5d5..8ebf9fbd 100644
+--- a/src/libopensc/opensc.h
++++ b/src/libopensc/opensc.h
+@@ -1664,6 +1664,19 @@ int iso7816_update_binary_sfid(sc_card_t *card, unsigned char sfid,
+  * */
+ int iso7816_logout(sc_card_t *card, unsigned char pin_reference);
+ 
++/*
++ * @brief Format PIN APDU for modifiction by card driver
++ *
++ * @param[in] card           card
++ * @param[in] apdu           apdu structure to update with PIN APDU
++ * @param[in] data           pin command data to set into the APDU
++ * @param[in] buf            buffer for APDU data field
++ * @param[in] buf_len        maximum buffer length
++ */
++int
++iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
++		struct sc_pin_cmd_data *data, u8 *buf, size_t buf_len);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/libopensc/pkcs15-cac.c b/src/libopensc/pkcs15-cac.c
+index ccb27994..05056ea9 100644
+--- a/src/libopensc/pkcs15-cac.c
++++ b/src/libopensc/pkcs15-cac.c
+@@ -79,6 +79,7 @@ static const char * cac_get_name(int type)
+     switch (type) {
+     case SC_CARD_TYPE_CAC_I: return ("CAC I");
+     case SC_CARD_TYPE_CAC_II: return ("CAC II");
++    case SC_CARD_TYPE_CAC_ALT_HID: return ("CAC ALT HID");
+     default: break;
+     }
+     return ("CAC");

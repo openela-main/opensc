@@ -1,0 +1,24 @@
+commit 8d4af9eb0b799f22b25783e8e1b7af329b5a917b
+Author: Frank Morgner <frankmorgner@gmail.com>
+Date:   Fri Jan 31 12:15:53 2020 +0100
+
+    pkcs11: fixed right padding of token label with ' '
+    
+    fixes https://github.com/OpenSC/OpenSC/issues/1922
+
+diff --git a/src/pkcs11/framework-pkcs15.c b/src/pkcs11/framework-pkcs15.c
+index e94eeeff..a1951c2e 100644
+--- a/src/pkcs11/framework-pkcs15.c
++++ b/src/pkcs11/framework-pkcs15.c
+@@ -1122,9 +1122,10 @@ pkcs15_init_slot(struct sc_pkcs15_card *p15card, struct sc_pkcs11_slot *slot,
+ 							max_tokeninfo_len);
+ 					slot->token_info.label[max_tokeninfo_len]           = ' ';
+ 					slot->token_info.label[max_tokeninfo_len+1]         = '(';
+-					slot->token_info.label[max_tokeninfo_len+2+pin_len] = ')';
+ 					strcpy_bp(slot->token_info.label+max_tokeninfo_len+2,
+ 							auth->label, pin_len);
++					strcpy_bp(slot->token_info.label+max_tokeninfo_len+2+pin_len,
++							")", 32 - max_tokeninfo_len-2-pin_len);
+ 				}
+ 			} else {
+ 				/* PIN label is empty or just says non-useful "PIN",
