@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.20.0
-Release:        4%{?dist}
+Release:        6%{?dist}
 Summary:        Smart card library and applications
 
 Group:          System Environment/Libraries
@@ -32,6 +32,28 @@ Patch15:        opensc-0.20.0-calloc0.patch
 # https://github.com/OpenSC/OpenSC/pull/2148
 # + configuration change by default
 Patch16:        opensc-0.20.0-file-cache.patch
+# https://github.com/OpenSC/OpenSC/pull/1929
+Patch17:        opensc-0.20.0-idprime.patch
+# https://github.com/OpenSC/OpenSC/pull/2787
+Patch18:        opensc-0.20.0-CVE-2023-2977.patch
+# 31d8c2dfd14ed01b430def2f46cc718ef4b595fc
+# 8f4a6c703b5ae7d4f44cf33c85330171afa917bf
+# https://github.com/OpenSC/OpenSC/pull/1970 without the first and last commits
+# https://github.com/OpenSC/OpenSC/pull/1923
+# https://github.com/OpenSC/OpenSC/pull/2051
+# https://github.com/OpenSC/OpenSC/pull/2077
+# https://github.com/OpenSC/OpenSC/pull/2418
+# https://github.com/OpenSC/OpenSC/pull/2600
+# c2e00e9071952b30ed6d58d9b7670eb3d93ea6fb
+# https://github.com/OpenSC/OpenSC/pull/2740
+## OpenSC notify build issues
+# 5e79a2a4abdd523cfff19824718bbb0d8ced7320
+# 843779fe6e0f345f483f9ce9c9739913502391eb
+# 7936bdef15c71139a6a6159cabaf9e6101565add
+# 1202eceeefd5ffab45648d41ed0a3076cac10920
+# 295f399304644e6b0acde267ac410d0aae4a1aee
+# ca01aa7a8edc8280a5ceadebb472c2e3c198d8c2
+Patch19:        opensc-0.20.0-reader-removal.patch
 
 
 BuildRequires:  pcsc-lite-devel
@@ -71,6 +93,9 @@ every software/card that does so, too.
 %patch14 -p1 -b .padding
 %patch15 -p1 -b .calloc0
 %patch16 -p1 -b .file-cache
+%patch17 -p1 -b .idprime
+%patch18 -p1 -b .CVE-2023-2977
+%patch19 -p1 -b .reader-removal
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -229,6 +254,14 @@ fi
 
 
 %changelog
+* Tue Jul 11 2023 Jakub Jelen <jjelen@redhat.com> - 0.20.0-6
+- Fix introduced issues tagged by coverity (RHEL-765)
+
+* Thu Jun 15 2023 Jakub Jelen <jjelen@redhat.com> - 0.20.0-5
+- Avoid potential crash because of missing list terminator (#2196234)
+- Fix CVE-2023-2977: potential buffer overrun in pkcs15 cardos_have_verifyrc_package (#2211093)
+- Backport upstream changes regarding to reader removal (#2097048)
+
 * Fri Nov 20 2020 Jakub Jelen <jjelen@redhat.com> - 0.20.0-4
 - Use file cache by default (#1892810)
 - Avoid calloc with 0 argument (#1895401)
