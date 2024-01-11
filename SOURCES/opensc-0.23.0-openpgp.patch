@@ -1,0 +1,225 @@
+From 3b580b6fff9ac463ecc6e996cfaf573f62749368 Mon Sep 17 00:00:00 2001
+From: Frank Morgner <frankmorgner@gmail.com>
+Date: Fri, 14 Apr 2023 12:02:54 +0200
+Subject: [PATCH 1/2] openpgp: identify OpenPGP compliance with bcd_version
+ rather than card type
+
+---
+ src/libopensc/card-openpgp.c | 22 +++++++++++++---------
+ 1 file changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/src/libopensc/card-openpgp.c b/src/libopensc/card-openpgp.c
+index fad32f0ce7..2ea5dc9d36 100644
+--- a/src/libopensc/card-openpgp.c
++++ b/src/libopensc/card-openpgp.c
+@@ -1780,13 +1780,18 @@ pgp_get_pubkey_pem(sc_card_t *card, unsigned int tag, u8 *buf, size_t buf_len)
+  * p1: number of an instance (DO 7F21: 0x00 for AUT, 0x01 for DEC and 0x02 for SIG)
+  */
+ static int
+-pgp_select_data(sc_card_t *card, u8 p1){
++pgp_select_data(sc_card_t *card, u8 p1)
++{
+ 	sc_apdu_t	apdu;
+ 	u8	apdu_data[6];
+ 	int	r;
++	struct pgp_priv_data *priv = DRVDATA(card);
+ 
+ 	LOG_FUNC_CALLED(card->ctx);
+ 
++	if (priv->bcd_version < OPENPGP_CARD_3_0)
++		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
++
+ 	sc_log(card->ctx, "select data with: %u", p1);
+ 
+ 	// create apdu data (taken from spec: SELECT DATA 7.2.5.)
+@@ -2179,8 +2184,7 @@ pgp_set_security_env(sc_card_t *card,
+ 	/* The SC_SEC_ENV_ALG_PRESENT is set always so let it pass for GNUK */
+ 	if ((env->flags & SC_SEC_ENV_ALG_PRESENT)
+ 		&& (env->algorithm != SC_ALGORITHM_RSA)
+-		&& (priv->bcd_version < OPENPGP_CARD_3_0)
+-		&& (card->type != SC_CARD_TYPE_OPENPGP_GNUK))
++		&& (priv->bcd_version < OPENPGP_CARD_3_0))
+ 		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS,
+ 				"only RSA algorithm supported");
+ 
+@@ -2944,13 +2948,13 @@ pgp_update_card_algorithms(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *ke
+ {
+ 	sc_algorithm_info_t *algo;
+ 	u8 id = key_info->key_id;
++	struct pgp_priv_data *priv = DRVDATA(card);
+ 
+ 	LOG_FUNC_CALLED(card->ctx);
+ 
+ 	/* protect incompatible cards against non-RSA */
+ 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA
+-		&& card->type < SC_CARD_TYPE_OPENPGP_V3
+-		&& card->type != SC_CARD_TYPE_OPENPGP_GNUK)
++		&& priv->bcd_version < OPENPGP_CARD_3_0)
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+ 
+ 	if (id > card->algorithm_count) {
+@@ -2992,13 +2996,13 @@ pgp_gen_key(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *key_info)
+ 	size_t apdu_le;
+ 	size_t resplen = 0;
+ 	int r = SC_SUCCESS;
++	struct pgp_priv_data *priv = DRVDATA(card);
+ 
+ 	LOG_FUNC_CALLED(card->ctx);
+ 
+ 	/* protect incompatible cards against non-RSA */
+ 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA
+-		&& card->type < SC_CARD_TYPE_OPENPGP_V3
+-		&& card->type != SC_CARD_TYPE_OPENPGP_GNUK)
++		&& priv->bcd_version < OPENPGP_CARD_3_0)
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+ 	if (key_info->algorithm == SC_OPENPGP_KEYALGO_EDDSA
+ 		&& card->type != SC_CARD_TYPE_OPENPGP_GNUK)
+@@ -3358,13 +3362,13 @@ pgp_store_key(sc_card_t *card, sc_cardctl_openpgp_keystore_info_t *key_info)
+ 	u8 *data = NULL;
+ 	size_t len = 0;
+ 	int r;
++	struct pgp_priv_data *priv = DRVDATA(card);
+ 
+ 	LOG_FUNC_CALLED(card->ctx);
+ 
+ 	/* protect incompatible cards against non-RSA */
+ 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA
+-		&& card->type < SC_CARD_TYPE_OPENPGP_V3
+-		&& card->type != SC_CARD_TYPE_OPENPGP_GNUK)
++		&& priv->bcd_version < OPENPGP_CARD_3_0)
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+ 
+ 	/* Validate */
+
+From 9eccc1494d8303ffe42beb772732df218875e3ac Mon Sep 17 00:00:00 2001
+From: Frank Morgner <frankmorgner@gmail.com>
+Date: Fri, 14 Apr 2023 12:09:55 +0200
+Subject: [PATCH 2/2] openpgp: ignore errors on SELECT DATA for OpenPGP 2 and
+ below
+
+fixes https://github.com/OpenSC/OpenSC/issues/2752
+---
+ src/libopensc/pkcs15-openpgp.c | 11 +++--------
+ 1 file changed, 3 insertions(+), 8 deletions(-)
+
+diff --git a/src/libopensc/pkcs15-openpgp.c b/src/libopensc/pkcs15-openpgp.c
+index e2f3442238..9d3fd746a0 100644
+--- a/src/libopensc/pkcs15-openpgp.c
++++ b/src/libopensc/pkcs15-openpgp.c
+@@ -556,14 +556,9 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
+ 		memset(&cert_info, 0, sizeof(cert_info));
+ 		memset(&cert_obj,  0, sizeof(cert_obj));
+ 
+-		/* only try to SELECT DATA for OpenPGP >= v3 */
+-		if (card->type >= SC_CARD_TYPE_OPENPGP_V3) {
+-			r = sc_card_ctl(card, SC_CARDCTL_OPENPGP_SELECT_DATA, &i);
+-			if (r < 0) {
+-				free(buffer);
+-				LOG_TEST_RET(card->ctx, r, "Failed OpenPGP - select data");
+-			}
+-		}
++		/* try to SELECT DATA. Will only work for OpenPGP >= v3, errors are non-critical */
++		sc_card_ctl(card, SC_CARDCTL_OPENPGP_SELECT_DATA, &i);
++
+ 		sc_format_path(certs[i].path, &cert_info.path);
+ 
+ 		/* Certificate ID. We use the same ID as the authentication key */
+
+commit e8fba322a2f4d06ec5c74fe80f9e2b0e9fdefec6
+Author: Jakub Jelen <jjelen@redhat.com>
+Date:   Fri May 19 16:49:00 2023 +0200
+
+    openpgp: Fix fingerprint calculation
+    
+    fixes https://github.com/OpenSC/OpenSC/issues/2775
+
+diff --git a/src/libopensc/card-openpgp.c b/src/libopensc/card-openpgp.c
+index cc454cef..496e38e6 100644
+--- a/src/libopensc/card-openpgp.c
++++ b/src/libopensc/card-openpgp.c
+@@ -2697,15 +2697,23 @@ pgp_calculate_and_store_fingerprint(sc_card_t *card, time_t ctime,
+ 
+ 	/* RSA */
+ 	if (key_info->algorithm == SC_OPENPGP_KEYALGO_RSA) {
++		unsigned short bytes_length = 0;
++
+ 		*p = 1; /* Algorithm ID, RSA */
+ 		p += 1;
++
++		/* Modulus */
++		bytes_length = BYTES4BITS(key_info->u.rsa.modulus_len);
+ 		ushort2bebytes(p, (unsigned short)key_info->u.rsa.modulus_len);
+ 		p += 2;
+-		memcpy(p, key_info->u.rsa.modulus, (BYTES4BITS(key_info->u.rsa.modulus_len)));
+-		p += (key_info->u.rsa.modulus_len >> 3);
+-		ushort2bebytes(++p, (unsigned short)key_info->u.rsa.exponent_len);
++		memcpy(p, key_info->u.rsa.modulus, bytes_length);
++		p += bytes_length;
++
++		/* Exponent */
++		bytes_length = BYTES4BITS(key_info->u.rsa.exponent_len);
++		ushort2bebytes(p, (unsigned short)key_info->u.rsa.exponent_len);
+ 		p += 2;
+-		memcpy(p, key_info->u.rsa.exponent, (BYTES4BITS(key_info->u.rsa.exponent_len)));
++		memcpy(p, key_info->u.rsa.exponent, bytes_length);
+ 	}
+ 	/* ECC */
+ 	else if (key_info->algorithm == SC_OPENPGP_KEYALGO_ECDH
+
+commit 891f10e49de1a5ee038b1cb2fb59dce40429e6c2
+Author: Jakub Jelen <jjelen@redhat.com>
+Date:   Fri May 19 17:53:35 2023 +0200
+
+    openpgp: Fix modulus length calculation in pkc15init layer
+
+diff --git a/src/libopensc/pkcs15.h b/src/libopensc/pkcs15.h
+index 5a0a19c5..ba685a30 100644
+--- a/src/libopensc/pkcs15.h
++++ b/src/libopensc/pkcs15.h
+@@ -373,7 +373,7 @@ struct sc_pkcs15_prkey_info {
+ 	unsigned int usage, access_flags;
+ 	int native, key_reference;
+ 	/* convert to union if other types are supported */
+-	size_t modulus_length; /* RSA */
++	size_t modulus_length; /* RSA, in bits */
+ 	size_t field_length;   /* EC in bits */
+ 
+ 	unsigned int algo_refs[SC_MAX_SUPPORTED_ALGORITHMS];
+diff --git a/src/pkcs15init/pkcs15-openpgp.c b/src/pkcs15init/pkcs15-openpgp.c
+index c75bcbda..3e060be5 100644
+--- a/src/pkcs15init/pkcs15-openpgp.c
++++ b/src/pkcs15init/pkcs15-openpgp.c
+@@ -235,7 +235,7 @@ static int openpgp_generate_key_rsa(sc_card_t *card, sc_pkcs15_object_t *obj,
+ 
+ 	/* Prepare buffer */
+ 	key_info.u.rsa.modulus_len = required->modulus_length;
+-	key_info.u.rsa.modulus = calloc(required->modulus_length >> 3, 1);
++	key_info.u.rsa.modulus = calloc(BYTES4BITS(required->modulus_length), 1);
+ 	if (key_info.u.rsa.modulus == NULL)
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_ENOUGH_MEMORY);
+ 
+@@ -252,18 +252,18 @@ static int openpgp_generate_key_rsa(sc_card_t *card, sc_pkcs15_object_t *obj,
+ 
+ 	pubkey->algorithm = SC_ALGORITHM_RSA;
+ 	sc_log(ctx, "Set output modulus info");
+-	pubkey->u.rsa.modulus.len = key_info.u.rsa.modulus_len;
+-	pubkey->u.rsa.modulus.data = calloc(key_info.u.rsa.modulus_len, 1);
++	pubkey->u.rsa.modulus.len = BYTES4BITS(key_info.u.rsa.modulus_len);
++	pubkey->u.rsa.modulus.data = calloc(pubkey->u.rsa.modulus.len, 1);
+ 	if (pubkey->u.rsa.modulus.data == NULL)
+ 		goto err;
+-	memcpy(pubkey->u.rsa.modulus.data, key_info.u.rsa.modulus, key_info.u.rsa.modulus_len);
++	memcpy(pubkey->u.rsa.modulus.data, key_info.u.rsa.modulus, BYTES4BITS(key_info.u.rsa.modulus_len));
+ 
+ 	sc_log(ctx, "Set output exponent info");
+-	pubkey->u.rsa.exponent.len = key_info.u.rsa.exponent_len;
+-	pubkey->u.rsa.exponent.data = calloc(BYTES4BITS(key_info.u.rsa.exponent_len), 1);
++	pubkey->u.rsa.exponent.len = BYTES4BITS(key_info.u.rsa.exponent_len);
++	pubkey->u.rsa.exponent.data = calloc(pubkey->u.rsa.exponent.len, 1);
+ 	if (pubkey->u.rsa.exponent.data == NULL)
+ 		goto err;
+-	memcpy(pubkey->u.rsa.exponent.data, key_info.u.rsa.exponent, BYTES4BITS(key_info.u.rsa.exponent_len));
++	memcpy(pubkey->u.rsa.exponent.data, key_info.u.rsa.exponent, pubkey->u.rsa.exponent.len);
+ 
+ err:
+ 	free(key_info.u.rsa.modulus);

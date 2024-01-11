@@ -1,0 +1,3047 @@
+From 739fa81050989c3f85ca883ec76542b71cae7edc Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Mon, 12 Dec 2022 12:23:20 +0100
+Subject: [PATCH] Avoid memory leak
+
+Thanks coverity: CID 382262
+---
+ src/sm/sm-common.c           | 24 ++++++++++++++----------
+ src/smm/sm-global-platform.c |  3 +--
+ 2 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/src/sm/sm-common.c b/src/sm/sm-common.c
+index ce60a83a4..caada2b7e 100644
+--- a/src/sm/sm-common.c
++++ b/src/sm/sm-common.c
+@@ -363,11 +363,9 @@ sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
+ 	int tmplen;
+ #endif
+ 
+-
+ 	if (!out || !out_len)
+ 		return -1;
+ 
+-
+ 	*out_len = data_len + 7;
+ 	*out_len -= *out_len % 8;
+ 
+@@ -385,29 +383,35 @@ sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
+ 	for (ii=0; ii<data_len; ii+=8)
+ 		DES_ecb2_encrypt( (sm_des_cblock *)(data + ii),
+ 				(sm_des_cblock *)(*out + ii), &ks, &ks2, DES_ENCRYPT);
++
++	return SC_SUCCESS;
+ #else
+ 	cctx = EVP_CIPHER_CTX_new();
++	if (cctx == NULL) {
++		goto err;
++	}
+ 	if (!EVP_EncryptInit_ex2(cctx, EVP_des_ede_ecb(), key, NULL, NULL)) {
+-		EVP_CIPHER_CTX_free(cctx);
+-		return SC_ERROR_INTERNAL;
++		goto err;
+ 	}
+ 	/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+ 	EVP_CIPHER_CTX_set_padding(cctx, 0);
+ 	if (!EVP_EncryptUpdate(cctx, *out, &tmplen, data, data_len)) {
+-		EVP_CIPHER_CTX_free(cctx);
+-		return SC_ERROR_INTERNAL;
++		goto err;
+ 	}
+ 	*out_len = tmplen;
+ 
+ 	if (!EVP_EncryptFinal_ex(cctx, *out + *out_len, &tmplen)) {
+-		EVP_CIPHER_CTX_free(cctx);
+-		return SC_ERROR_INTERNAL;
++		goto err;
+ 	}
+ 	*out_len += tmplen;
+ 	EVP_CIPHER_CTX_free(cctx);
+-#endif
++	return SC_SUCCESS;
+ 
+-	return 0;
++err:
++	EVP_CIPHER_CTX_free(cctx);
++	free(*out);
++	return SC_ERROR_INTERNAL;
++#endif
+ }
+ 
+ 
+diff --git a/src/smm/sm-global-platform.c b/src/smm/sm-global-platform.c
+index 334c73ee1..d91c9a7e4 100644
+--- a/src/smm/sm-global-platform.c
++++ b/src/smm/sm-global-platform.c
+@@ -97,7 +97,7 @@ sc_gp_get_session_key(struct sc_context *ctx, struct sm_gp_session *gp_session,
+ 		unsigned char *key)
+ {
+ 	int out_len;
+-	unsigned char *out;
++	unsigned char *out = NULL;
+ 	unsigned char deriv[16];
+ 
+ 	memcpy(deriv,		gp_session->card_challenge + 4,	4);
+@@ -108,7 +108,6 @@ sc_gp_get_session_key(struct sc_context *ctx, struct sm_gp_session *gp_session,
+ 	if (sm_encrypt_des_ecb3(key, deriv, 16, &out, &out_len))   {
+ 		if (ctx)
+ 			sc_debug(ctx, SC_LOG_DEBUG_VERBOSE, "SM GP get session key: des_ecb3 encryption error");
+-		free(out);
+ 		return NULL;
+ 	}
+ 	else if (out==NULL  || out_len!=16)   {
+-- 
+2.39.2
+
+
+
+From 7efc2c8be8178e352af682b91f7ebe3c3ca1d8b6 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 13:29:42 -0500
+Subject: [PATCH 01/20] Add support to initialize custom OpenSSL context
+
+Add an openssl custom libcontext to sc_context_t and intitalize it if we
+are using OpenSSL 3.0+
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/ctx.c            | 47 +++++++++++++++++++++++++++++++++-
+ src/libopensc/opensc.h         |  6 +++++
+ src/libopensc/sc-ossl-compat.h | 14 ++++++++++
+ 3 files changed, 66 insertions(+), 1 deletion(-)
+
+diff --git a/src/libopensc/ctx.c b/src/libopensc/ctx.c
+index 5b637b8e88..c1643bc489 100644
+--- a/src/libopensc/ctx.c
++++ b/src/libopensc/ctx.c
+@@ -804,6 +804,40 @@ int sc_context_repair(sc_context_t **ctx_out)
+ 	return SC_SUCCESS;
+ }
+ 
++#ifdef USE_OPENSSL3_LIBCTX
++static int sc_openssl3_init(sc_context_t *ctx)
++{
++	ctx->ossl3ctx = calloc(1, sizeof(ossl3ctx_t));
++	if (ctx->ossl3ctx == NULL)
++		return SC_ERROR_OUT_OF_MEMORY;
++	ctx->ossl3ctx->libctx = OSSL_LIB_CTX_new();
++	if (ctx->ossl3ctx->libctx == NULL) {
++		return SC_ERROR_INTERNAL;
++	}
++	ctx->ossl3ctx->defprov = OSSL_PROVIDER_load(ctx->ossl3ctx->libctx,
++						    "default");
++	if (ctx->ossl3ctx->defprov == NULL) {
++		OSSL_LIB_CTX_free(ctx->ossl3ctx->libctx);
++		free(ctx->ossl3ctx);
++		ctx->ossl3ctx = NULL;
++		return SC_ERROR_INTERNAL;
++	}
++	return SC_SUCCESS;
++}
++
++static void sc_openssl3_deinit(sc_context_t *ctx)
++{
++	if (ctx->ossl3ctx == NULL)
++		return;
++	if (ctx->ossl3ctx->defprov)
++		OSSL_PROVIDER_unload(ctx->ossl3ctx->defprov);
++	if (ctx->ossl3ctx->libctx)
++		OSSL_LIB_CTX_free(ctx->ossl3ctx->libctx);
++	free(ctx->ossl3ctx);
++	ctx->ossl3ctx = NULL;
++}
++#endif
++
+ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
+ {
+ 	sc_context_t		*ctx;
+@@ -858,6 +892,15 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
+ 	sc_log(ctx, "==================================="); /* first thing in the log */
+ 	sc_log(ctx, "opensc version: %s", sc_get_version());
+ 
++#ifdef USE_OPENSSL3_LIBCTX
++	r = sc_openssl3_init(ctx);
++	if (r != SC_SUCCESS) {
++		del_drvs(&opts);
++		sc_release_context(ctx);
++		return r;
++	}
++#endif
++
+ #ifdef ENABLE_PCSC
+ 	ctx->reader_driver = sc_get_pcsc_driver();
+ #elif defined(ENABLE_CRYPTOTOKENKIT)
+@@ -923,7 +966,6 @@ int sc_wait_for_event(sc_context_t *ctx, unsigned int event_mask, sc_reader_t **
+ 	return SC_ERROR_NOT_SUPPORTED;
+ }
+ 
+-
+ int sc_release_context(sc_context_t *ctx)
+ {
+ 	unsigned int i;
+@@ -948,6 +990,9 @@ int sc_release_context(sc_context_t *ctx)
+ 		if (drv->dll)
+ 			sc_dlclose(drv->dll);
+ 	}
++#ifdef USE_OPENSSL3_LIBCTX
++	sc_openssl3_deinit(ctx);
++#endif
+ 	if (ctx->preferred_language != NULL)
+ 		free(ctx->preferred_language);
+ 	if (ctx->mutex != NULL) {
+diff --git a/src/libopensc/opensc.h b/src/libopensc/opensc.h
+index c58550d602..958edcb98d 100644
+--- a/src/libopensc/opensc.h
++++ b/src/libopensc/opensc.h
+@@ -867,6 +867,8 @@ typedef struct {
+ #define SC_CTX_FLAG_DISABLE_POPUPS			0x00000010
+ #define SC_CTX_FLAG_DISABLE_COLORS			0x00000020
+ 
++typedef struct ossl3ctx ossl3ctx_t;
++
+ typedef struct sc_context {
+ 	scconf_context *conf;
+ 	scconf_block *conf_blocks[3];
+@@ -889,6 +891,10 @@ typedef struct sc_context {
+ 	sc_thread_context_t	*thread_ctx;
+ 	void *mutex;
+ 
++#ifdef ENABLE_OPENSSL
++	ossl3ctx_t *ossl3ctx;
++#endif
++
+ 	unsigned int magic;
+ } sc_context_t;
+ 
+diff --git a/src/libopensc/sc-ossl-compat.h b/src/libopensc/sc-ossl-compat.h
+index 4425da93f3..1b98b9f04d 100644
+--- a/src/libopensc/sc-ossl-compat.h
++++ b/src/libopensc/sc-ossl-compat.h
+@@ -65,6 +65,20 @@ extern "C" {
+ #define FIPS_mode()                             EVP_default_properties_is_fips_enabled(NULL)
+ #endif
+ 
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++
++#define USE_OPENSSL3_LIBCTX
++
++#include <openssl/provider.h>
++#include <openssl/crypto.h>
++
++typedef struct ossl3ctx {
++	OSSL_LIB_CTX *libctx;
++	OSSL_PROVIDER *defprov;
++} ossl3ctx_t;
++
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif /* __cplusplus */
+
+From 04ccab829e21c7540bd6129f4cc2066cc8e427ba Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 13:30:48 -0500
+Subject: [PATCH 02/20] Convert pkcs11/openssl.c to use the custom osslctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/sc-ossl-compat.h | 40 ++++++++++++++
+ src/pkcs11/openssl.c           | 96 ++++++++++++++++++++++++----------
+ 2 files changed, 109 insertions(+), 27 deletions(-)
+
+diff --git a/src/libopensc/sc-ossl-compat.h b/src/libopensc/sc-ossl-compat.h
+index 1b98b9f04d..8e976184b6 100644
+--- a/src/libopensc/sc-ossl-compat.h
++++ b/src/libopensc/sc-ossl-compat.h
+@@ -71,14 +71,54 @@ extern "C" {
+ 
+ #include <openssl/provider.h>
+ #include <openssl/crypto.h>
++#include <openssl/evp.h>
+ 
+ typedef struct ossl3ctx {
+ 	OSSL_LIB_CTX *libctx;
+ 	OSSL_PROVIDER *defprov;
+ } ossl3ctx_t;
+ 
++static inline EVP_MD *_sc_evp_md(ossl3ctx_t *ctx, const char *algorithm)
++{
++	return EVP_MD_fetch(ctx->libctx, algorithm, NULL);
++}
++#define sc_evp_md(ctx, alg) _sc_evp_md((ctx)->ossl3ctx, alg)
++
++static inline void sc_evp_md_free(EVP_MD *md)
++{
++	EVP_MD_free(md);
++}
++
++static inline EVP_PKEY_CTX *_sc_evp_pkey_ctx_new(ossl3ctx_t *ctx,
++						 EVP_PKEY *pkey)
++{
++	return EVP_PKEY_CTX_new_from_pkey(ctx->libctx, pkey, NULL);
++}
++#define sc_evp_pkey_ctx_new(ctx, pkey) \
++	_sc_evp_pkey_ctx_new((ctx)->ossl3ctx, pkey)
++
++#else /* OPENSSL < 3 */
++
++#include <openssl/evp.h>
++
++static inline EVP_MD *sc_evp_md(void *unused, const char *algorithm)
++{
++	return (EVP_MD *)EVP_get_digestbyname(algorithm);
++}
++
++static inline void sc_evp_md_free(EVP_MD *md)
++{
++	return;
++}
++
++static inline EVP_PKEY_CTX *sc_evp_pkey_ctx_new(void *unused, EVP_PKEY *pkey)
++{
++	return EVP_PKEY_CTX_new(pkey, NULL);
++}
++
+ #endif
+ 
++
+ #ifdef __cplusplus
+ }
+ #endif /* __cplusplus */
+diff --git a/src/pkcs11/openssl.c b/src/pkcs11/openssl.c
+index 6879e9e061..f62c32fa3f 100644
+--- a/src/pkcs11/openssl.c
++++ b/src/pkcs11/openssl.c
+@@ -231,6 +231,23 @@ static void * dup_mem(void *in, size_t in_len)
+ 	return out;
+ }
+ 
++static CK_RV ossl_md_copy(const void *src, void **dst)
++{
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++	int ret = EVP_MD_up_ref((EVP_MD *)src);
++	if (ret != 1) {
++		return CKR_GENERAL_ERROR;
++	}
++#endif
++	*dst = (EVP_MD *)src;
++	return CKR_OK;
++}
++
++static void ossl_md_free(const void *md)
++{
++	sc_evp_md_free((EVP_MD *)md);
++}
++
+ void
+ sc_pkcs11_register_openssl_mechanisms(struct sc_pkcs11_card *p11card)
+ {
+@@ -287,38 +304,52 @@ sc_pkcs11_register_openssl_mechanisms(struct sc_pkcs11_card *p11card)
+ #endif /* !defined(OPENSSL_NO_ENGINE) */
+ #endif /* OPENSSL_VERSION_NUMBER < 0x30000000L */
+ 
+-	openssl_sha1_mech.mech_data = EVP_sha1();
++	openssl_sha1_mech.mech_data = sc_evp_md(context, "sha1");
++	openssl_sha1_mech.free_mech_data = ossl_md_free;
++	openssl_sha1_mech.copy_mech_data = ossl_md_copy;
+ 	mt = dup_mem(&openssl_sha1_mech, sizeof openssl_sha1_mech);
+ 	sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 	sc_pkcs11_free_mechanism(&mt);
+ 
+-	openssl_sha224_mech.mech_data = EVP_sha224();
++	openssl_sha224_mech.mech_data = sc_evp_md(context, "sha224");
++	openssl_sha224_mech.free_mech_data = ossl_md_free;
++	openssl_sha224_mech.copy_mech_data = ossl_md_copy;
+ 	mt = dup_mem(&openssl_sha224_mech, sizeof openssl_sha224_mech);
+ 	sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 	sc_pkcs11_free_mechanism(&mt);
+ 
+-	openssl_sha256_mech.mech_data = EVP_sha256();
++	openssl_sha256_mech.mech_data = sc_evp_md(context, "sha256");
++	openssl_sha256_mech.free_mech_data = ossl_md_free;
++	openssl_sha256_mech.copy_mech_data = ossl_md_copy;
+ 	mt = dup_mem(&openssl_sha256_mech, sizeof openssl_sha256_mech);
+ 	sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 	sc_pkcs11_free_mechanism(&mt);
+ 
+-	openssl_sha384_mech.mech_data = EVP_sha384();
++	openssl_sha384_mech.mech_data = sc_evp_md(context, "sha384");
++	openssl_sha384_mech.free_mech_data = ossl_md_free;
++	openssl_sha384_mech.copy_mech_data = ossl_md_copy;
+ 	mt = dup_mem(&openssl_sha384_mech, sizeof openssl_sha384_mech);
+ 	sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 	sc_pkcs11_free_mechanism(&mt);
+ 
+-	openssl_sha512_mech.mech_data = EVP_sha512();
++	openssl_sha512_mech.mech_data = sc_evp_md(context, "sha512");
++	openssl_sha512_mech.free_mech_data = ossl_md_free;
++	openssl_sha512_mech.copy_mech_data = ossl_md_copy;
+ 	mt = dup_mem(&openssl_sha512_mech, sizeof openssl_sha512_mech);
+ 	sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 	sc_pkcs11_free_mechanism(&mt);
+ 
+ 	if (!FIPS_mode()) {
+-		openssl_md5_mech.mech_data = EVP_md5();
++		openssl_md5_mech.mech_data = sc_evp_md(context, "md5");
++		openssl_md5_mech.free_mech_data = ossl_md_free;
++		openssl_md5_mech.copy_mech_data = ossl_md_copy;
+ 		mt = dup_mem(&openssl_md5_mech, sizeof openssl_md5_mech);
+ 		sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 		sc_pkcs11_free_mechanism(&mt);
+ 
+-		openssl_ripemd160_mech.mech_data = EVP_ripemd160();
++		openssl_ripemd160_mech.mech_data = sc_evp_md(context, "ripemd160");
++		openssl_ripemd160_mech.free_mech_data = ossl_md_free;
++		openssl_ripemd160_mech.copy_mech_data = ossl_md_copy;
+ 		mt = dup_mem(&openssl_ripemd160_mech, sizeof openssl_ripemd160_mech);
+ 		sc_pkcs11_register_mechanism(p11card, mt, NULL);
+ 		sc_pkcs11_free_mechanism(&mt);
+@@ -654,22 +685,22 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 		    || mech->mechanism == CKM_ECDSA_SHA384
+ 		    || mech->mechanism == CKM_ECDSA_SHA512) {
+ 			EVP_MD_CTX *mdctx;
+-			const EVP_MD *md;
++			EVP_MD *md = NULL;
+ 			switch (mech->mechanism) {
+ 				case CKM_ECDSA_SHA1:
+-					md = EVP_sha1();
++					md = sc_evp_md(context, "sha1");
+ 					break;
+ 				case CKM_ECDSA_SHA224:
+-					md = EVP_sha224();
++					md = sc_evp_md(context, "sha224");
+ 					break;
+ 				case CKM_ECDSA_SHA256:
+-					md = EVP_sha256();
++					md = sc_evp_md(context, "sha256");
+ 					break;
+ 				case CKM_ECDSA_SHA384:
+-					md = EVP_sha384();
++					md = sc_evp_md(context, "sha384");
+ 					break;
+ 				case CKM_ECDSA_SHA512:
+-					md = EVP_sha512();
++					md = sc_evp_md(context, "sha512");
+ 					break;
+ 				default:
+ 					EVP_PKEY_free(pkey);
+@@ -679,11 +710,13 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 			mdbuf = calloc(1, mdbuf_len);
+ 			if (mdbuf == NULL) {
+ 				EVP_PKEY_free(pkey);
++				sc_evp_md_free(md);
+ 				return CKR_DEVICE_MEMORY;
+ 			}
+ 			if ((mdctx = EVP_MD_CTX_new()) == NULL) {
+ 				free(mdbuf);
+ 				EVP_PKEY_free(pkey);
++				sc_evp_md_free(md);
+ 				return CKR_GENERAL_ERROR;
+ 			}
+ 			if (!EVP_DigestInit(mdctx, md)
+@@ -691,10 +724,12 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 				|| !EVP_DigestFinal(mdctx, mdbuf, &mdbuf_len)) {
+ 				EVP_PKEY_free(pkey);
+ 				EVP_MD_CTX_free(mdctx);
++				sc_evp_md_free(md);
+ 				free(mdbuf);
+ 				return CKR_GENERAL_ERROR;
+ 			}
+ 			EVP_MD_CTX_free(mdctx);
++			sc_evp_md_free(md);
+ 			data = mdbuf;
+ 			data_len = mdbuf_len;
+ 		}
+@@ -702,7 +737,7 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 		res = 0;
+ 		r = sc_asn1_sig_value_rs_to_sequence(NULL, signat, signat_len,
+ 						     &signat_tmp, &signat_len_tmp);
+-		ctx = EVP_PKEY_CTX_new(pkey, NULL);
++		ctx = sc_evp_pkey_ctx_new(context, pkey);
+ 		if (r == 0 && EVP_PKEY_base_id(pkey) == EVP_PKEY_EC && ctx && EVP_PKEY_verify_init(ctx) == 1)
+ 			res = EVP_PKEY_verify(ctx, signat_tmp, signat_len_tmp, data, data_len);
+ 
+@@ -721,7 +756,7 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 	} else {
+ 		unsigned char *rsa_out = NULL, pad;
+ 		size_t rsa_outlen = 0;
+-		EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
++		EVP_PKEY_CTX *ctx = sc_evp_pkey_ctx_new(context, pkey);
+ 		if (!ctx) {
+ 			EVP_PKEY_free(pkey);
+ 			return CKR_DEVICE_MEMORY;
+@@ -783,7 +818,7 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 		    mech->mechanism == CKM_SHA384_RSA_PKCS_PSS ||
+ 		    mech->mechanism == CKM_SHA512_RSA_PKCS_PSS) {
+ 			CK_RSA_PKCS_PSS_PARAMS* param = NULL;
+-			const EVP_MD *mgf_md, *pss_md;
++			EVP_MD *mgf_md = NULL, *pss_md = NULL;
+ 			unsigned char digest[EVP_MAX_MD_SIZE];
+ 
+ 			if (mech->pParameter == NULL) {
+@@ -796,19 +831,19 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 			param = (CK_RSA_PKCS_PSS_PARAMS*)mech->pParameter;
+ 			switch (param->mgf) {
+ 			case CKG_MGF1_SHA1:
+-				mgf_md = EVP_sha1();
++				mgf_md = sc_evp_md(context, "sha1");
+ 				break;
+ 			case CKG_MGF1_SHA224:
+-				mgf_md = EVP_sha224();
++				mgf_md = sc_evp_md(context, "sha224");
+ 				break;
+ 			case CKG_MGF1_SHA256:
+-				mgf_md = EVP_sha256();
++				mgf_md = sc_evp_md(context, "sha256");
+ 				break;
+ 			case CKG_MGF1_SHA384:
+-				mgf_md = EVP_sha384();
++				mgf_md = sc_evp_md(context, "sha384");
+ 				break;
+ 			case CKG_MGF1_SHA512:
+-				mgf_md = EVP_sha512();
++				mgf_md = sc_evp_md(context, "sha512");
+ 				break;
+ 			default:
+ 				free(rsa_out);
+@@ -818,21 +853,22 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 
+ 			switch (param->hashAlg) {
+ 			case CKM_SHA_1:
+-				pss_md = EVP_sha1();
++				pss_md = sc_evp_md(context, "sha1");
+ 				break;
+ 			case CKM_SHA224:
+-				pss_md = EVP_sha224();
++				pss_md = sc_evp_md(context, "sha224");
+ 				break;
+ 			case CKM_SHA256:
+-				pss_md = EVP_sha256();
++				pss_md = sc_evp_md(context, "sha256");
+ 				break;
+ 			case CKM_SHA384:
+-				pss_md = EVP_sha384();
++				pss_md = sc_evp_md(context, "sha384");
+ 				break;
+ 			case CKM_SHA512:
+-				pss_md = EVP_sha512();
++				pss_md = sc_evp_md(context, "sha512");
+ 				break;
+ 			default:
++				sc_evp_md_free(mgf_md);
+ 				free(rsa_out);
+ 				EVP_PKEY_free(pkey);
+ 				return CKR_MECHANISM_PARAM_INVALID;
+@@ -848,6 +884,8 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 				unsigned int tmp_len;
+ 
+ 				if (!md_ctx || !EVP_DigestFinal(md_ctx, tmp, &tmp_len)) {
++					sc_evp_md_free(mgf_md);
++					sc_evp_md_free(pss_md);
+ 					free(rsa_out);
+ 					EVP_PKEY_free(pkey);
+ 					return CKR_GENERAL_ERROR;
+@@ -865,13 +903,15 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 			else
+ 				sLen = param->sLen;
+ 
+-			if ((ctx = EVP_PKEY_CTX_new(pkey, NULL)) == NULL ||
++			if ((ctx = sc_evp_pkey_ctx_new(context, pkey)) == NULL ||
+ 				EVP_PKEY_verify_init(ctx) != 1 ||
+ 				EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) != 1 ||
+ 				EVP_PKEY_CTX_set_signature_md(ctx, pss_md) != 1 ||
+ 				EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, sLen) != 1 ||
+ 				EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, mgf_md) != 1) {
+ 				sc_log(context, "Failed to initialize EVP_PKEY_CTX");
++				sc_evp_md_free(mgf_md);
++				sc_evp_md_free(pss_md);
+ 				free(rsa_out);
+ 				EVP_PKEY_free(pkey);
+ 				EVP_PKEY_CTX_free(ctx);
+@@ -883,6 +923,8 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, unsigned int pubkey_len
+ 				rv = CKR_OK;
+ 			EVP_PKEY_free(pkey);
+ 			EVP_PKEY_CTX_free(ctx);
++			sc_evp_md_free(mgf_md);
++			sc_evp_md_free(pss_md);
+ 			free(rsa_out);
+ 			sc_log(context, "Returning %lu", rv);
+ 			return rv;
+
+From 25a916bbeeda1827f0d1cc631b41d5a3da032f60 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 15:05:13 -0500
+Subject: [PATCH 03/20] Load also the legacy provider
+
+This is not ideal, but some of the code uses legacy algorithms that are
+not available without this provider.
+
+The code that depends on those legacy algorithms will fail if the legacy
+provider is not available (which is a legitimate choice by the admin and/or
+system integrator). Therefore we just report an error but do not fail
+initialization if the legacy provider is not available.
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/ctx.c            | 7 +++++++
+ src/libopensc/sc-ossl-compat.h | 1 +
+ 2 files changed, 8 insertions(+)
+
+diff --git a/src/libopensc/ctx.c b/src/libopensc/ctx.c
+index c1643bc489..6d4a7c5593 100644
+--- a/src/libopensc/ctx.c
++++ b/src/libopensc/ctx.c
+@@ -822,6 +822,11 @@ static int sc_openssl3_init(sc_context_t *ctx)
+ 		ctx->ossl3ctx = NULL;
+ 		return SC_ERROR_INTERNAL;
+ 	}
++	ctx->ossl3ctx->legacyprov = OSSL_PROVIDER_load(ctx->ossl3ctx->libctx,
++						       "legacy");
++	if (ctx->ossl3ctx->legacyprov == NULL) {
++		sc_log(ctx, "Failed to load OpenSSL Legacy provider");
++	}
+ 	return SC_SUCCESS;
+ }
+ 
+@@ -829,6 +834,8 @@ static void sc_openssl3_deinit(sc_context_t *ctx)
+ {
+ 	if (ctx->ossl3ctx == NULL)
+ 		return;
++	if (ctx->ossl3ctx->legacyprov)
++		OSSL_PROVIDER_unload(ctx->ossl3ctx->legacyprov);
+ 	if (ctx->ossl3ctx->defprov)
+ 		OSSL_PROVIDER_unload(ctx->ossl3ctx->defprov);
+ 	if (ctx->ossl3ctx->libctx)
+diff --git a/src/libopensc/sc-ossl-compat.h b/src/libopensc/sc-ossl-compat.h
+index 8e976184b6..579d7f83f9 100644
+--- a/src/libopensc/sc-ossl-compat.h
++++ b/src/libopensc/sc-ossl-compat.h
+@@ -76,6 +76,7 @@ extern "C" {
+ typedef struct ossl3ctx {
+ 	OSSL_LIB_CTX *libctx;
+ 	OSSL_PROVIDER *defprov;
++	OSSL_PROVIDER *legacyprov;
+ } ossl3ctx_t;
+ 
+ static inline EVP_MD *_sc_evp_md(ossl3ctx_t *ctx, const char *algorithm)
+
+From 0a111e41634cf6bbb3dad7c0d4c90b173bd20b74 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 14:47:26 -0500
+Subject: [PATCH 04/20] Add wrappers for EVP_CIPHERs
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/sc-ossl-compat.h | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/libopensc/sc-ossl-compat.h b/src/libopensc/sc-ossl-compat.h
+index 579d7f83f9..942de1175f 100644
+--- a/src/libopensc/sc-ossl-compat.h
++++ b/src/libopensc/sc-ossl-compat.h
+@@ -98,6 +98,17 @@ static inline EVP_PKEY_CTX *_sc_evp_pkey_ctx_new(ossl3ctx_t *ctx,
+ #define sc_evp_pkey_ctx_new(ctx, pkey) \
+ 	_sc_evp_pkey_ctx_new((ctx)->ossl3ctx, pkey)
+ 
++static inline EVP_CIPHER *_sc_evp_cipher(ossl3ctx_t *ctx, const char *algorithm)
++{
++	return EVP_CIPHER_fetch(ctx->libctx, algorithm, NULL);
++}
++#define sc_evp_cipher(ctx, alg) _sc_evp_cipher((ctx)->ossl3ctx, alg)
++
++static inline void sc_evp_cipher_free(EVP_CIPHER *cipher)
++{
++	EVP_CIPHER_free(cipher);
++}
++
+ #else /* OPENSSL < 3 */
+ 
+ #include <openssl/evp.h>
+@@ -117,6 +128,16 @@ static inline EVP_PKEY_CTX *sc_evp_pkey_ctx_new(void *unused, EVP_PKEY *pkey)
+ 	return EVP_PKEY_CTX_new(pkey, NULL);
+ }
+ 
++static inline EVP_CIPHER *sc_evp_cipher(void *unused, const char *algorithm)
++{
++	return (EVP_CIPHER *)EVP_get_cipherbyname(algorithm);
++}
++
++static inline void sc_evp_cipher_free(EVP_CIPHER *cipher)
++{
++	return;
++}
++
+ #endif
+ 
+ 
+
+From 92d178216e9ab5737102805e9dfbb06bbd446332 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 14:48:46 -0500
+Subject: [PATCH 05/20] Convert card entersafe to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-entersafe.c | 29 +++++++++++++++++++++--------
+ 1 file changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/src/libopensc/card-entersafe.c b/src/libopensc/card-entersafe.c
+index 24f2c75877..ec81f0eaa1 100644
+--- a/src/libopensc/card-entersafe.c
++++ b/src/libopensc/card-entersafe.c
+@@ -199,6 +199,8 @@ static int entersafe_cipher_apdu(sc_card_t *card, sc_apdu_t *apdu,
+ 								 u8 *buff, size_t buffsize)
+ {
+ 	 EVP_CIPHER_CTX * ctx = NULL;
++	EVP_CIPHER *alg = NULL;
++
+ 	 u8 iv[8]={0};
+ 	 int len;
+ 
+@@ -220,20 +222,27 @@ static int entersafe_cipher_apdu(sc_card_t *card, sc_apdu_t *apdu,
+ 		 LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
+ 	 EVP_CIPHER_CTX_set_padding(ctx,0);
+ 
+-	 if(keylen == 8)
+-		  EVP_EncryptInit_ex(ctx, EVP_des_ecb(), NULL, key, iv);
+-	 else if (keylen == 16) 
+-		  EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, key, iv);
+-	 else
++	if (keylen == 8) {
++	 	alg = sc_evp_cipher(card->ctx, "DES-ECB");
++		EVP_EncryptInit_ex(ctx, alg, NULL, key, iv);
++	} else if (keylen == 16) {
++	 	alg = sc_evp_cipher(card->ctx, "DES-EDE");
++		EVP_EncryptInit_ex(ctx, alg, NULL, key, iv);
++	} else {
++		EVP_CIPHER_CTX_free(ctx);
+ 		  LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+-	 
++	}
++
+ 	 len = apdu->lc;
+ 	 if(!EVP_EncryptUpdate(ctx, buff, &len, buff, buffsize)){
++		sc_evp_cipher_free(alg);
++		EVP_CIPHER_CTX_free(ctx);
+ 		  sc_log(card->ctx,  "entersafe encryption error.");
+ 		  LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	 }
+ 	 apdu->lc = len;
+ 
++	sc_evp_cipher_free(alg);
+ 	 EVP_CIPHER_CTX_free(ctx);
+ 
+ 	 if(apdu->lc!=buffsize)
+@@ -258,6 +267,7 @@ static int entersafe_mac_apdu(sc_card_t *card, sc_apdu_t *apdu,
+ 	 size_t tmpsize=0,tmpsize_rounded=0;
+ 	 int outl=0;
+ 	 EVP_CIPHER_CTX * ctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 
+ 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+ 
+@@ -301,7 +311,8 @@ static int entersafe_mac_apdu(sc_card_t *card, sc_apdu_t *apdu,
+ 		goto out;
+ 	 }
+ 	 EVP_CIPHER_CTX_set_padding(ctx,0);
+-	 EVP_EncryptInit_ex(ctx, EVP_des_cbc(), NULL, key, iv);
++	alg = sc_evp_cipher(card->ctx, "DES-CBC");
++	EVP_EncryptInit_ex(ctx, alg, NULL, key, iv);
+ 
+ 	 if(tmpsize_rounded>8){
+ 		  if(!EVP_EncryptUpdate(ctx,tmp_rounded,&outl,tmp_rounded,tmpsize_rounded-8)){
+@@ -338,8 +349,10 @@ static int entersafe_mac_apdu(sc_card_t *card, sc_apdu_t *apdu,
+ 		  free(tmp);
+ 	 if(tmp_rounded)
+ 		  free(tmp_rounded);
+-	 if  (ctx)
++	 if (ctx) {
++		sc_evp_cipher_free(alg);
+ 		EVP_CIPHER_CTX_free(ctx);
++	}
+ 
+ 	 SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, r);
+ }
+
+From f16cdd1dc816c4fc6210edc3f23990b556515119 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 15:41:59 -0500
+Subject: [PATCH 06/20] Convert card epass2003 to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-epass2003.c | 188 +++++++++++++++++++++------------
+ 1 file changed, 119 insertions(+), 69 deletions(-)
+
+diff --git a/src/libopensc/card-epass2003.c b/src/libopensc/card-epass2003.c
+index d8a88fa376..335dba7dfb 100644
+--- a/src/libopensc/card-epass2003.c
++++ b/src/libopensc/card-epass2003.c
+@@ -238,7 +238,7 @@ static const sec_attr_to_acl_entries_t sec_attr_to_acl_entry[] = {
+ static int epass2003_transmit_apdu(struct sc_card *card, struct sc_apdu *apdu);
+ static int epass2003_select_file(struct sc_card *card, const sc_path_t * in_path, sc_file_t ** file_out);
+ int epass2003_refresh(struct sc_card *card);
+-static int hash_data(const unsigned char *data, size_t datalen, unsigned char *hash, unsigned int mechanismType);
++static int hash_data(struct sc_card *card, const unsigned char *data, size_t datalen, unsigned char *hash, unsigned int mechanismType);
+ 
+ static int
+ epass2003_check_sw(struct sc_card *card, unsigned int sw1, unsigned int sw2)
+@@ -337,8 +337,8 @@ openssl_dec(const EVP_CIPHER * cipher, const unsigned char *key, const unsigned
+ }
+ 
+ static int
+-aes128_encrypt_cmac_ft(const unsigned char *key, int keysize,
+-        const unsigned char *input, size_t length, unsigned char *output,unsigned char *iv) 
++aes128_encrypt_cmac_ft(struct sc_card *card, const unsigned char *key, int keysize,
++	const unsigned char *input, size_t length, unsigned char *output,unsigned char *iv) 
+ {
+ 	unsigned char data1[32] = {0}; 
+ 	unsigned char data2[32] = {0}; 
+@@ -354,10 +354,13 @@ aes128_encrypt_cmac_ft(const unsigned char *key, int keysize,
+ 	int r = SC_ERROR_INTERNAL;
+ 	unsigned char out[32] = {0}; 
+ 	unsigned char iv0[EVP_MAX_IV_LENGTH] = {0}; 
+-	r = openssl_enc(EVP_aes_128_ecb(), key, iv0, data1, 16, out);
+-	if( r != SC_SUCCESS)
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "AES-128-ECB");
++	r = openssl_enc(alg, key, iv0, data1, 16, out);
++	if (r != SC_SUCCESS) {
++		sc_evp_cipher_free(alg);
+ 		return r;
+-	
++	}
++
+ 	check = out[0];
+ 	enc1 = BN_new();
+ 	lenc1 = BN_new();
+@@ -396,12 +399,14 @@ aes128_encrypt_cmac_ft(const unsigned char *key, int keysize,
+ 	for (int i=0;i<16;i++){
+ 		data2[i]=data2[i]^k2Bin[offset + i];
+ 	}
+-	return openssl_enc(EVP_aes_128_cbc(), key, iv, data2, 16, output);
++	r = openssl_enc(alg, key, iv, data2, 16, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ static int
+-aes128_encrypt_cmac(const unsigned char *key, int keysize,
+-        const unsigned char *input, size_t length, unsigned char *output)
++aes128_encrypt_cmac(struct sc_card *card, const unsigned char *key, int keysize,
++	const unsigned char *input, size_t length, unsigned char *output)
+ {
+ 	size_t mactlen = 0;
+ 	int r = SC_ERROR_INTERNAL;
+@@ -424,7 +429,7 @@ aes128_encrypt_cmac(const unsigned char *key, int keysize,
+ err:
+ 	CMAC_CTX_free(ctx);
+ #else
+-	EVP_MAC *mac = EVP_MAC_fetch(NULL, "cmac", NULL);
++	EVP_MAC *mac = EVP_MAC_fetch(card->ctx->ossl3ctx->libctx, "cmac", NULL);
+ 	if(mac == NULL){    
+ 		return r;
+ 	}
+@@ -456,36 +461,50 @@ aes128_encrypt_cmac(const unsigned char *key, int keysize,
+ }
+ 
+ static int
+-aes128_encrypt_ecb(const unsigned char *key, int keysize,
++aes128_encrypt_ecb(struct sc_card *card, const unsigned char *key, int keysize,
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+ 	unsigned char iv[EVP_MAX_IV_LENGTH] = { 0 };
+-	return openssl_enc(EVP_aes_128_ecb(), key, iv, input, length, output);
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "AES-128-ECB");
++	int r;
++	r = openssl_enc(alg, key, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-aes128_encrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[16],
++aes128_encrypt_cbc(struct sc_card *card, const unsigned char *key, int keysize, unsigned char iv[16],
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+-	return openssl_enc(EVP_aes_128_cbc(), key, iv, input, length, output);
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "AES-128-CBC");
++	int r;
++	r = openssl_enc(alg, key, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-aes128_decrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[16],
++aes128_decrypt_cbc(struct sc_card *card, const unsigned char *key, int keysize, unsigned char iv[16],
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+-	return openssl_dec(EVP_aes_128_cbc(), key, iv, input, length, output);
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "AES-128-CBC");
++	int r;
++	r = openssl_dec(alg, key, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-des3_encrypt_ecb(const unsigned char *key, int keysize,
++des3_encrypt_ecb(struct sc_card *card, const unsigned char *key, int keysize,
+ 		const unsigned char *input, int length, unsigned char *output)
+ {
+ 	unsigned char iv[EVP_MAX_IV_LENGTH] = { 0 };
+ 	unsigned char bKey[24] = { 0 };
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "DES-EDE3");
++	int r;
+ 
+ 	if (keysize == 16) {
+ 		memcpy(&bKey[0], key, 16);
+@@ -495,15 +514,19 @@ des3_encrypt_ecb(const unsigned char *key, int keysize,
+ 		memcpy(&bKey[0], key, 24);
+ 	}
+ 
+-	return openssl_enc(EVP_des_ede3(), bKey, iv, input, length, output);
++	r = openssl_enc(alg, bKey, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-des3_encrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
++des3_encrypt_cbc(struct sc_card *card, const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+ 	unsigned char bKey[24] = { 0 };
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "DES-EDE3-CBC");
++	int r;
+ 
+ 	if (keysize == 16) {
+ 		memcpy(&bKey[0], key, 16);
+@@ -513,15 +536,20 @@ des3_encrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[EVP_MAX
+ 		memcpy(&bKey[0], key, 24);
+ 	}
+ 
+-	return openssl_enc(EVP_des_ede3_cbc(), bKey, iv, input, length, output);
++	r = openssl_enc(EVP_des_ede3_cbc(), bKey, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-des3_decrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
++des3_decrypt_cbc(struct sc_card *card, const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+ 	unsigned char bKey[24] = { 0 };
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "DES-EDE3-CBC");
++	int r;
++
+ 	if (keysize == 16) {
+ 		memcpy(&bKey[0], key, 16);
+ 		memcpy(&bKey[16], key, 8);
+@@ -530,23 +558,35 @@ des3_decrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[EVP_MAX
+ 		memcpy(&bKey[0], key, 24);
+ 	}
+ 
+-	return openssl_dec(EVP_des_ede3_cbc(), bKey, iv, input, length, output);
++	r = openssl_dec(alg, bKey, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-des_encrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
++des_encrypt_cbc(struct sc_card *card, const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+-	return openssl_enc(EVP_des_cbc(), key, iv, input, length, output);
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "DES-CBC");
++	int r;
++
++	r = openssl_enc(alg, key, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+ static int
+-des_decrypt_cbc(const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
++des_decrypt_cbc(struct sc_card *card, const unsigned char *key, int keysize, unsigned char iv[EVP_MAX_IV_LENGTH],
+ 		const unsigned char *input, size_t length, unsigned char *output)
+ {
+-	return openssl_dec(EVP_des_cbc(), key, iv, input, length, output);
++	EVP_CIPHER *alg = sc_evp_cipher(card->ctx, "DES-CBC");
++	int r;
++
++	r = openssl_dec(alg, key, iv, input, length, output);
++	sc_evp_cipher_free(alg);
++	return r;
+ }
+ 
+ 
+@@ -585,15 +625,25 @@ openssl_dig(const EVP_MD * digest, const unsigned char *input, size_t length,
+ 
+ 
+ static int
+-sha1_digest(const unsigned char *input, size_t length, unsigned char *output)
++sha1_digest(struct sc_card *card, const unsigned char *input, size_t length, unsigned char *output)
+ {
+-	return openssl_dig(EVP_sha1(), input, length, output);
++	EVP_MD *md = sc_evp_md(card->ctx, "SHA1");
++	int r;
++
++	r = openssl_dig(md, input, length, output);
++	sc_evp_md_free(md);
++	return r;
+ }
+ 
+ static int
+-sha256_digest(const unsigned char *input, size_t length, unsigned char *output)
++sha256_digest(struct sc_card *card, const unsigned char *input, size_t length, unsigned char *output)
+ {
+-	return openssl_dig(EVP_sha256(), input, length, output);
++	EVP_MD *md = sc_evp_md(card->ctx, "SHA256");
++	int r;
++
++	r = openssl_dig(md, input, length, output);
++	sc_evp_md_free(md);
++	return r;
+ }
+ 
+ 
+@@ -658,22 +708,22 @@ gen_init_key(struct sc_card *card, unsigned char *key_enc, unsigned char *key_ma
+ 	/* Step 2,3 - Create S-ENC/S-MAC Session Key */
+ 	if (KEY_TYPE_AES == key_type) {
+ 		if(isFips){
+-        	    	r = aes128_encrypt_cmac(key_enc, 128, data, 32, exdata->sk_enc);
++		    	r = aes128_encrypt_cmac(card, key_enc, 128, data, 32, exdata->sk_enc);
+             		LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cmac enc failed");
+             		memset(&data[11], 0x06, 1);
+-            		r = aes128_encrypt_cmac(key_mac, 128, data, 32, exdata->sk_mac);
++	    		r = aes128_encrypt_cmac(card, key_mac, 128, data, 32, exdata->sk_mac);
+             		LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cmac mac  failed");
+         	}else{
+-			r = aes128_encrypt_ecb(key_enc, 16, data, 16, exdata->sk_enc);
++			r = aes128_encrypt_ecb(card, key_enc, 16, data, 16, exdata->sk_enc);
+ 			LOG_TEST_RET(card->ctx, r, "aes128_encrypt_ecb enc  failed");
+-			r = aes128_encrypt_ecb(key_mac, 16, data, 16, exdata->sk_mac);
++			r = aes128_encrypt_ecb(card, key_mac, 16, data, 16, exdata->sk_mac);
+ 			LOG_TEST_RET(card->ctx, r, "aes128_encrypt_ecb mac  failed");
+ 		}
+ 	}
+ 	else {
+-		r = des3_encrypt_ecb(key_enc, 16, data, 16, exdata->sk_enc);
++		r = des3_encrypt_ecb(card, key_enc, 16, data, 16, exdata->sk_enc);
+ 		LOG_TEST_RET(card->ctx, r, "des3_encrypt_ecb failed");
+-		r = des3_encrypt_ecb(key_mac, 16, data, 16, exdata->sk_mac);
++		r = des3_encrypt_ecb(card, key_mac, 16, data, 16, exdata->sk_mac);
+ 		LOG_TEST_RET(card->ctx, r, "des3_encrypt_ecb failed");
+ 	}
+ 
+@@ -693,14 +743,14 @@ gen_init_key(struct sc_card *card, unsigned char *key_enc, unsigned char *key_ma
+ 	if (KEY_TYPE_AES == key_type)
+ 	{
+ 		if(isFips){
+-			r = aes128_encrypt_cmac(exdata->sk_enc, 128, data, 32, cryptogram);
++			r = aes128_encrypt_cmac(card, exdata->sk_enc, 128, data, 32, cryptogram);
+ 		}
+ 		else{
+-			r = aes128_encrypt_cbc(exdata->sk_enc, 16, iv, data, 16 + blocksize, cryptogram);
++			r = aes128_encrypt_cbc(card, exdata->sk_enc, 16, iv, data, 16 + blocksize, cryptogram);
+ 		}
+ 	}
+ 	else
+-		r = des3_encrypt_cbc(exdata->sk_enc, 16, iv, data, 16 + blocksize, cryptogram);
++		r = des3_encrypt_cbc(card, exdata->sk_enc, 16, iv, data, 16 + blocksize, cryptogram);
+ 
+ 	LOG_TEST_RET(card->ctx, r, "calculate host cryptogram failed");
+ 
+@@ -758,13 +808,13 @@ verify_init_key(struct sc_card *card, unsigned char *ran_key, unsigned char key_
+ 	/* calculate host cryptogram */
+ 	if (KEY_TYPE_AES == key_type) {
+ 		if(isFips){
+-			r = aes128_encrypt_cmac(exdata->sk_enc, 128, data, 32, cryptogram);
++			r = aes128_encrypt_cmac(card, exdata->sk_enc, 128, data, 32, cryptogram);
+ 		}
+ 		else{
+-			r = aes128_encrypt_cbc(exdata->sk_enc, 16, iv, data, 16 + blocksize,cryptogram);
++			r = aes128_encrypt_cbc(card, exdata->sk_enc, 16, iv, data, 16 + blocksize,cryptogram);
+ 		}
+ 	} else {
+-		r = des3_encrypt_cbc(exdata->sk_enc, 16, iv, data, 16 + blocksize,cryptogram);
++		r = des3_encrypt_cbc(card, exdata->sk_enc, 16, iv, data, 16 + blocksize,cryptogram);
+ 	}
+ 
+ 	LOG_TEST_RET(card->ctx, r, "calculate host cryptogram  failed");
+@@ -783,14 +833,14 @@ verify_init_key(struct sc_card *card, unsigned char *ran_key, unsigned char key_
+ 	memset(iv, 0x00, 16);
+ 	if (KEY_TYPE_AES == key_type) {
+ 		if(isFips){
+-			r = aes128_encrypt_cmac(exdata->sk_mac, 128, data, 13, mac);
++			r = aes128_encrypt_cmac(card, exdata->sk_mac, 128, data, 13, mac);
+ 		}
+ 		else{
+-			r = aes128_encrypt_cbc(exdata->sk_mac, 16, iv, data, 16, mac);
++			r = aes128_encrypt_cbc(card, exdata->sk_mac, 16, iv, data, 16, mac);
+ 		}
+ 		i = 0;
+ 	} else {
+-		r = des3_encrypt_cbc(exdata->sk_mac, 16, iv, data, 16, mac);
++		r = des3_encrypt_cbc(card, exdata->sk_mac, 16, iv, data, 16, mac);
+ 		i = 8;
+ 	}
+ 
+@@ -923,10 +973,10 @@ construct_data_tlv(struct sc_card *card, struct sc_apdu *apdu, unsigned char *ap
+ 
+ 	/* encrypt Data */
+ 	if (KEY_TYPE_AES == key_type) {
+-		r = aes128_encrypt_cbc(exdata->sk_enc, 16, iv, pad, pad_len, apdu_buf + block_size + tlv_more);
++		r = aes128_encrypt_cbc(card, exdata->sk_enc, 16, iv, pad, pad_len, apdu_buf + block_size + tlv_more);
+ 		LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cbc failed");
+ 	} else {
+-		r = des3_encrypt_cbc(exdata->sk_enc, 16, iv, pad, pad_len, apdu_buf + block_size + tlv_more);
++		r = des3_encrypt_cbc(card, exdata->sk_enc, 16, iv, pad, pad_len, apdu_buf + block_size + tlv_more);
+ 		LOG_TEST_RET(card->ctx, r, "des3_encrypt_cbc failed");
+ 	}
+ 
+@@ -1018,7 +1068,7 @@ construct_mac_tlv(struct sc_card *card, unsigned char *apdu_buf, size_t data_tlv
+             		{
+                 		apdu_buf[i]=apdu_buf[i]^icv[i];
+             		}
+-            		r = aes128_encrypt_cmac(exdata->sk_mac, 128, apdu_buf, data_tlv_len+le_tlv_len+block_size, mac);
++	    		r = aes128_encrypt_cmac(card, exdata->sk_mac, 128, apdu_buf, data_tlv_len+le_tlv_len+block_size, mac);
+             		LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cmac failed");
+             		memcpy(mac_tlv+2, &mac[0/*ulmacLen-16*/], 8);
+             		for (int j=0;j<4;j++)
+@@ -1027,7 +1077,7 @@ construct_mac_tlv(struct sc_card *card, unsigned char *apdu_buf, size_t data_tlv
+             		}
+         	}
+ 		else{
+-			r = aes128_encrypt_cbc(exdata->sk_mac, 16, icv, apdu_buf, mac_len, mac);
++			r = aes128_encrypt_cbc(card, exdata->sk_mac, 16, icv, apdu_buf, mac_len, mac);
+ 			LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cbc failed");
+ 			memcpy(mac_tlv + 2, &mac[mac_len - 16], 8);
+ 		}
+@@ -1035,12 +1085,12 @@ construct_mac_tlv(struct sc_card *card, unsigned char *apdu_buf, size_t data_tlv
+ 	else {
+ 		unsigned char iv[EVP_MAX_IV_LENGTH] = { 0 };
+ 		unsigned char tmp[8] = { 0 };
+-		r = des_encrypt_cbc(exdata->sk_mac, 8, icv, apdu_buf, mac_len, mac);
++		r = des_encrypt_cbc(card, exdata->sk_mac, 8, icv, apdu_buf, mac_len, mac);
+ 		LOG_TEST_RET(card->ctx, r, "des_encrypt_cbc 1 failed");
+-		r = des_decrypt_cbc(&exdata->sk_mac[8], 8, iv, &mac[mac_len - 8], 8, tmp);
++		r = des_decrypt_cbc(card, &exdata->sk_mac[8], 8, iv, &mac[mac_len - 8], 8, tmp);
+ 		LOG_TEST_RET(card->ctx, r, "des_decrypt_cbc failed");
+ 		memset(iv, 0x00, sizeof iv);
+-		r = des_encrypt_cbc(exdata->sk_mac, 8, iv, tmp, 8, mac_tlv + 2);
++		r = des_encrypt_cbc(card, exdata->sk_mac, 8, iv, tmp, 8, mac_tlv + 2);
+ 		LOG_TEST_RET(card->ctx, r, "des_encrypt_cbc 2 failed");
+ 	}
+ 
+@@ -1051,7 +1101,7 @@ construct_mac_tlv(struct sc_card *card, unsigned char *apdu_buf, size_t data_tlv
+ /* MAC(TLV case 1) */
+ static int
+ construct_mac_tlv_case1(struct sc_card *card, unsigned char *apdu_buf, size_t data_tlv_len, size_t le_tlv_len,
+-        unsigned char *mac_tlv, size_t * mac_tlv_len, const unsigned char key_type)
++	unsigned char *mac_tlv, size_t * mac_tlv_len, const unsigned char key_type)
+ {
+     int r;
+     size_t block_size = 4;
+@@ -1100,13 +1150,13 @@ construct_mac_tlv_case1(struct sc_card *card, unsigned char *apdu_buf, size_t da
+     if (KEY_TYPE_AES == key_type) {
+         if(exdata->bFipsCertification)
+         {
+-            r = aes128_encrypt_cmac_ft(exdata->sk_mac, 128, apdu_buf,data_tlv_len+le_tlv_len+block_size, mac, &icv[0]);
++            r = aes128_encrypt_cmac_ft(card, exdata->sk_mac, 128, apdu_buf,data_tlv_len+le_tlv_len+block_size, mac, &icv[0]);
+             LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cmac_ft failed");
+             memcpy(mac_tlv+2, &mac[0/*ulmacLen-16*/], 8);
+         }
+         else
+         {
+-            r = aes128_encrypt_cbc(exdata->sk_mac, 16, icv, apdu_buf, mac_len, mac);
++	    r = aes128_encrypt_cbc(card, exdata->sk_mac, 16, icv, apdu_buf, mac_len, mac);
+             LOG_TEST_RET(card->ctx, r, "aes128_encrypt_cbc failed");
+             memcpy(mac_tlv + 2, &mac[mac_len - 16], 8);
+         }
+@@ -1115,12 +1165,12 @@ construct_mac_tlv_case1(struct sc_card *card, unsigned char *apdu_buf, size_t da
+     {
+         unsigned char iv[EVP_MAX_IV_LENGTH] = { 0 };
+         unsigned char tmp[8] = { 0 };
+-        r = des_encrypt_cbc(exdata->sk_mac, 8, icv, apdu_buf, mac_len, mac);
++	r = des_encrypt_cbc(card, exdata->sk_mac, 8, icv, apdu_buf, mac_len, mac);
+         LOG_TEST_RET(card->ctx, r, "des_encrypt_cbc  failed");
+-        r = des_decrypt_cbc(&exdata->sk_mac[8], 8, iv, &mac[mac_len - 8], 8, tmp);
++	r = des_decrypt_cbc(card, &exdata->sk_mac[8], 8, iv, &mac[mac_len - 8], 8, tmp);
+         LOG_TEST_RET(card->ctx, r, "des_decrypt_cbc failed");
+         memset(iv, 0x00, sizeof iv);
+-        r = des_encrypt_cbc(exdata->sk_mac, 8, iv, tmp, 8, mac_tlv + 2);
++	r = des_encrypt_cbc(card, exdata->sk_mac, 8, iv, tmp, 8, mac_tlv + 2);
+         LOG_TEST_RET(card->ctx, r, "des_encrypt_cbc failed");
+     }
+ 
+@@ -1329,9 +1379,9 @@ decrypt_response(struct sc_card *card, unsigned char *in, size_t inlen, unsigned
+ 
+ 	/* decrypt */
+ 	if (KEY_TYPE_AES == exdata->smtype)
+-		aes128_decrypt_cbc(exdata->sk_enc, 16, iv, &in[i], cipher_len - 1, plaintext);
++		aes128_decrypt_cbc(card, exdata->sk_enc, 16, iv, &in[i], cipher_len - 1, plaintext);
+ 	else
+-		des3_decrypt_cbc(exdata->sk_enc, 16, iv, &in[i], cipher_len - 1, plaintext);
++		des3_decrypt_cbc(card, exdata->sk_enc, 16, iv, &in[i], cipher_len - 1, plaintext);
+ 
+ 	/* unpadding */
+ 	while (0x80 != plaintext[cipher_len - 2] && (cipher_len > 2))
+@@ -2118,7 +2168,7 @@ static int epass2003_decipher(struct sc_card *card, const u8 * data, size_t data
+ 	{
+ 		if(exdata->ecAlgFlags & SC_ALGORITHM_ECDSA_HASH_SHA1)
+ 		{
+-			r = hash_data(data, datalen, sbuf, SC_ALGORITHM_ECDSA_HASH_SHA1);
++			r = hash_data(card, data, datalen, sbuf, SC_ALGORITHM_ECDSA_HASH_SHA1);
+ 			LOG_TEST_RET(card->ctx, r, "hash_data failed"); 
+ 			sc_format_apdu(card, &apdu, SC_APDU_CASE_3,0x2A, 0x9E, 0x9A);
+ 			apdu.data = sbuf;
+@@ -2127,7 +2177,7 @@ static int epass2003_decipher(struct sc_card *card, const u8 * data, size_t data
+ 		}
+ 		else if (exdata->ecAlgFlags & SC_ALGORITHM_ECDSA_HASH_SHA256)
+ 		{
+-			r = hash_data(data, datalen, sbuf, SC_ALGORITHM_ECDSA_HASH_SHA256);
++			r = hash_data(card, data, datalen, sbuf, SC_ALGORITHM_ECDSA_HASH_SHA256);
+ 			LOG_TEST_RET(card->ctx, r, "hash_data failed");
+ 			sc_format_apdu(card, &apdu, SC_APDU_CASE_3,0x2A, 0x9E, 0x9A);
+ 			apdu.data = sbuf;
+@@ -2717,7 +2767,7 @@ internal_write_rsa_key(struct sc_card *card, unsigned short fid, struct sc_pkcs1
+ 
+ 
+ static int
+-hash_data(const unsigned char *data, size_t datalen, unsigned char *hash, unsigned int mechanismType)
++hash_data(struct sc_card *card, const unsigned char *data, size_t datalen, unsigned char *hash, unsigned int mechanismType)
+ {
+ 
+ 	if ((NULL == data) || (NULL == hash))
+@@ -2728,7 +2778,7 @@ hash_data(const unsigned char *data, size_t datalen, unsigned char *hash, unsign
+ 		unsigned char data_hash[24] = { 0 };
+ 		size_t len = 0;
+ 
+-		sha1_digest(data, datalen, data_hash);
++		sha1_digest(card, data, datalen, data_hash);
+ 		len = REVERSE_ORDER4(datalen);
+ 		memcpy(&data_hash[20], &len, 4);
+ 		memcpy(hash, data_hash, 24);
+@@ -2738,7 +2788,7 @@ hash_data(const unsigned char *data, size_t datalen, unsigned char *hash, unsign
+ 		unsigned char data_hash[36] = { 0 };
+ 		size_t len = 0;
+ 
+-		sha256_digest(data, datalen, data_hash);
++		sha256_digest(card, data, datalen, data_hash);
+ 		len = REVERSE_ORDER4(datalen);
+ 		memcpy(&data_hash[32], &len, 4);
+ 		memcpy(hash, data_hash, 36);
+@@ -2819,7 +2869,7 @@ internal_install_pin(struct sc_card *card, sc_epass2003_wkey_data * pin)
+ 	int r;
+ 	unsigned char hash[HASH_LEN] = { 0 };
+ 
+-	r = hash_data(pin->key_data.es_secret.key_val, pin->key_data.es_secret.key_len, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
++	r = hash_data(card, pin->key_data.es_secret.key_val, pin->key_data.es_secret.key_len, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
+ 	LOG_TEST_RET(card->ctx, r, "hash data failed");
+ 
+ 	r = install_secret_key(card, 0x04, pin->key_data.es_secret.kid,
+@@ -3165,10 +3215,10 @@ external_key_auth(struct sc_card *card, unsigned char kid,
+ 	r = sc_get_challenge(card, random, 8);
+ 	LOG_TEST_RET(card->ctx, r, "get challenge external_key_auth failed");
+ 
+-	r = hash_data(data, datalen, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
++	r = hash_data(card, data, datalen, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
+ 	LOG_TEST_RET(card->ctx, r, "hash data failed");
+ 
+-	des3_encrypt_cbc(hash, HASH_LEN, iv, random, 8, tmp_data);
++	des3_encrypt_cbc(card, hash, HASH_LEN, iv, random, 8, tmp_data);
+ 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x82, 0x01, 0x80 | kid);
+ 	apdu.lc = apdu.datalen = 8;
+ 	apdu.data = tmp_data;
+@@ -3192,7 +3242,7 @@ update_secret_key(struct sc_card *card, unsigned char ktype, unsigned char kid,
+ 	unsigned char tmp_data[256] = { 0 };
+ 	unsigned char maxtries = 0;
+ 
+-	r = hash_data(data, datalen, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
++	r = hash_data(card, data, datalen, hash, SC_ALGORITHM_ECDSA_HASH_SHA1);
+ 	LOG_TEST_RET(card->ctx, r, "hash data failed");
+ 
+ 	r = get_external_key_maxtries(card, &maxtries);
+
+From 129c72af12c348fc22653b6beba70440af455af0 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:09:15 -0500
+Subject: [PATCH 07/20] Remove call to load legacy provider from cwa14890
+
+Library code should *never* arbitrarily load the legacy provider in the
+default application context. It may literally break or make an
+application vulnerable by sneaking in unexpected algorithms.
+
+This is not needed anymore given we will use an opensc specific context
+that will not affect the rest of the application (or other libraries).
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-authentic.c |  1 -
+ src/libopensc/cwa14890.c       | 24 ------------------------
+ 2 files changed, 25 deletions(-)
+
+diff --git a/src/libopensc/card-authentic.c b/src/libopensc/card-authentic.c
+index 2c16144de6..d7bb92a496 100644
+--- a/src/libopensc/card-authentic.c
++++ b/src/libopensc/card-authentic.c
+@@ -39,7 +39,6 @@
+ #include "authentic.h"
+ 
+ #include <openssl/bn.h>
+-#include <openssl/evp.h>
+ #include <openssl/pem.h>
+ #include <openssl/err.h>
+ #include <openssl/rand.h>
+diff --git a/src/libopensc/cwa14890.c b/src/libopensc/cwa14890.c
+index c859a956bd..f3f0c5859c 100644
+--- a/src/libopensc/cwa14890.c
++++ b/src/libopensc/cwa14890.c
+@@ -49,10 +49,6 @@
+ # include <openssl/provider.h>
+ #endif
+ 
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+-	static OSSL_PROVIDER *legacy_provider = NULL;
+-#endif
+-
+ #define MAX_RESP_BUFFER_SIZE 2048
+ 
+ /**
+@@ -1618,16 +1614,6 @@ int cwa_encode_apdu(sc_card_t * card,
+ 	tmplen = 0;
+ 	key = sm_session->session_mac;
+ 
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+-	if (!legacy_provider) {
+-		if (!(legacy_provider = OSSL_PROVIDER_try_load(NULL, "legacy", 1))) {
+-			msg = "Failed to load legacy provider";
+-			res = SC_ERROR_INTERNAL;
+-			goto encode_end;
+-		}
+-	}
+-#endif
+-
+ 	if (EVP_EncryptInit_ex(cctx, EVP_des_ecb(), NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx, 0) != 1) {
+ 		msg = "Error in DES ECB encryption";
+@@ -1860,16 +1846,6 @@ int cwa_decode_response(sc_card_t * card,
+ 	/* set up key for mac computing */
+ 	key = sm_session->session_mac;
+ 
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+-	if (!legacy_provider) {
+-		if (!(legacy_provider = OSSL_PROVIDER_try_load(NULL, "legacy", 1))) {
+-			msg = "Failed to load legacy provider";
+-			res = SC_ERROR_INTERNAL;
+-			goto response_decode_end;
+-		}
+-	}
+-#endif
+-
+ 	if (EVP_EncryptInit_ex(cctx, EVP_des_ecb(), NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx, 0) != 1) {
+ 		msg = "Error in DES ECB encryption";
+
+From 28cebc986ec9d6b2ab61a11be72dd19e012d32d4 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:26:54 -0500
+Subject: [PATCH 08/20] Convert card cwa14890 to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/cwa-dnie.c |  6 +++---
+ src/libopensc/cwa14890.c | 30 ++++++++++++++++++++++++------
+ 2 files changed, 27 insertions(+), 9 deletions(-)
+
+diff --git a/src/libopensc/cwa-dnie.c b/src/libopensc/cwa-dnie.c
+index 81092c6b9c..fff0e13df1 100644
+--- a/src/libopensc/cwa-dnie.c
++++ b/src/libopensc/cwa-dnie.c
+@@ -695,8 +695,8 @@ static int dnie_get_root_ca_pubkey(sc_card_t * card, EVP_PKEY ** root_ca_key)
+ 	EVP_PKEY_CTX *ctx = NULL;
+ 	OSSL_PARAM_BLD *bld = NULL;
+ 	OSSL_PARAM *params = NULL;
+-	
+-	ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
++
++	ctx = EVP_PKEY_CTX_new_from_name(card->ctx->ossl3ctx->libctx, "RSA", NULL);
+ 	if (!ctx) {
+ #endif
+ 		sc_log(card->ctx, "Cannot create data for root CA public key");
+@@ -895,7 +895,7 @@ static int dnie_get_privkey(sc_card_t * card, EVP_PKEY ** ifd_privkey,
+ 	EVP_PKEY_CTX *ctx = NULL;
+ 
+ 	LOG_FUNC_CALLED(card->ctx);
+-	ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
++	ctx = EVP_PKEY_CTX_new_from_name(card->ctx->ossl3ctx->libctx, "RSA", NULL);
+ 
+ 	if (!ctx) { 
+ #endif
+diff --git a/src/libopensc/cwa14890.c b/src/libopensc/cwa14890.c
+index f3f0c5859c..b8662f4ff1 100644
+--- a/src/libopensc/cwa14890.c
++++ b/src/libopensc/cwa14890.c
+@@ -1471,6 +1471,7 @@ int cwa_encode_apdu(sc_card_t * card,
+ 	u8 *cryptbuf = NULL;
+ 
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	unsigned char *key = NULL;
+ 	int tmplen = 0;
+ 
+@@ -1561,7 +1562,9 @@ int cwa_encode_apdu(sc_card_t * card,
+ 		*cryptbuf = 0x01;
+ 		key = sm_session->session_enc;
+ 
+-		if (EVP_EncryptInit_ex(cctx, EVP_des_ede_cbc(), NULL, key, iv) != 1 ||
++		alg = sc_evp_cipher(card->ctx, "DES-EDE-CBC");
++
++		if (EVP_EncryptInit_ex(cctx, alg, NULL, key, iv) != 1 ||
+ 			EVP_CIPHER_CTX_set_padding(cctx, 0) != 1 ||
+ 			EVP_EncryptUpdate(cctx, cryptbuf + 1, &dlen, msgbuf, dlen) != 1 ||
+ 			EVP_EncryptFinal_ex(cctx, cryptbuf + 1 + dlen, &tmplen) != 1) {
+@@ -1614,7 +1617,9 @@ int cwa_encode_apdu(sc_card_t * card,
+ 	tmplen = 0;
+ 	key = sm_session->session_mac;
+ 
+-	if (EVP_EncryptInit_ex(cctx, EVP_des_ecb(), NULL, key, NULL) != 1 ||
++	sc_evp_cipher_free(alg);
++	alg = sc_evp_cipher(card->ctx, "DES-ECB");
++	if (EVP_EncryptInit_ex(cctx, alg, NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx, 0) != 1) {
+ 		msg = "Error in DES ECB encryption";
+ 		res = SC_ERROR_INTERNAL;
+@@ -1639,7 +1644,10 @@ int cwa_encode_apdu(sc_card_t * card,
+ 	}
+ 
+ 	/* and apply 3DES to result */
+-	if (EVP_EncryptInit_ex(cctx, EVP_des_ede_ecb(), NULL, key, NULL) != 1 ||
++	sc_evp_cipher_free(alg);
++	alg = sc_evp_cipher(card->ctx, "DES-EDE-ECB");
++
++	if (EVP_EncryptInit_ex(cctx, alg, NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx, 0) != 1 ||
+ 		EVP_EncryptUpdate(cctx, macbuf, &tmplen, macbuf, 8) != 1 ||
+ 		EVP_EncryptFinal_ex(cctx, macbuf + tmplen, &tmplen) != 1) {
+@@ -1673,6 +1681,7 @@ int cwa_encode_apdu(sc_card_t * card,
+ 	if (from->resp != to->resp)
+ 		free(to->resp);
+ encode_end_apdu_valid:
++	sc_evp_cipher_free(alg);
+ 	if (cctx)
+ 		EVP_CIPHER_CTX_free(cctx);
+ 	if (msg)
+@@ -1718,6 +1727,7 @@ int cwa_decode_response(sc_card_t * card,
+ 	struct sm_cwa_session * sm_session = &card->sm_ctx.info.session.cwa;
+ 
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	unsigned char *key = NULL;
+ 	int tmplen = 0;
+ 
+@@ -1846,7 +1856,8 @@ int cwa_decode_response(sc_card_t * card,
+ 	/* set up key for mac computing */
+ 	key = sm_session->session_mac;
+ 
+-	if (EVP_EncryptInit_ex(cctx, EVP_des_ecb(), NULL, key, NULL) != 1 ||
++	alg = sc_evp_cipher(card->ctx, "DES-ECB");
++	if (EVP_EncryptInit_ex(cctx, alg, NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx, 0) != 1) {
+ 		msg = "Error in DES ECB encryption";
+ 		res = SC_ERROR_INTERNAL;
+@@ -1872,7 +1883,10 @@ int cwa_decode_response(sc_card_t * card,
+ 	}
+ 
+ 	/* finally apply 3DES to result */
+-	if (EVP_EncryptInit_ex(cctx, EVP_des_ede_ecb(), NULL, key, NULL) != 1 ||
++	sc_evp_cipher_free(alg);
++	alg = sc_evp_cipher(card->ctx, "DES-EDE-ECB");
++
++	if (EVP_EncryptInit_ex(cctx, alg, NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx, 0) != 1 ||
+ 		EVP_EncryptUpdate(cctx, macbuf, &tmplen, macbuf, 8) != 1 ||
+ 		EVP_EncryptFinal_ex(cctx, macbuf + tmplen, &tmplen) != 1) {
+@@ -1928,7 +1942,10 @@ int cwa_decode_response(sc_card_t * card,
+ 
+ 		/* decrypt into response buffer
+ 		 * by using 3DES CBC by mean of kenc and iv={0,...0} */
+-		if (EVP_DecryptInit_ex(cctx, EVP_des_ede_cbc(), NULL, key, iv) != 1 ||
++		sc_evp_cipher_free(alg);
++		alg = sc_evp_cipher(card->ctx, "DES-EDE-CBC");
++
++		if (EVP_DecryptInit_ex(cctx, alg, NULL, key, iv) != 1 ||
+ 			EVP_CIPHER_CTX_set_padding(cctx, 0) != 1 ||
+ 			EVP_DecryptUpdate(cctx, apdu->resp, &dlen, &e_tlv->data[1], e_tlv->len - 1) != 1 ||
+ 			EVP_DecryptFinal_ex(cctx, apdu->resp + dlen, &tmplen) != 1) {
+@@ -1957,6 +1974,7 @@ int cwa_decode_response(sc_card_t * card,
+ 	res = SC_SUCCESS;
+ 
+  response_decode_end:
++	sc_evp_cipher_free(alg);
+  	EVP_CIPHER_CTX_free(cctx);
+ 	if (buffer)
+ 		free(buffer);
+
+From 7e305908dba5b4fb305ebb0c44bc9eb0418479a2 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:34:53 -0500
+Subject: [PATCH 09/20] Convert card GIDS to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-gids.c | 26 +++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+diff --git a/src/libopensc/card-gids.c b/src/libopensc/card-gids.c
+index f25e37de45..f41af2707e 100644
+--- a/src/libopensc/card-gids.c
++++ b/src/libopensc/card-gids.c
+@@ -1959,14 +1959,9 @@ static int gids_authenticate_admin(sc_card_t *card, u8* key) {
+ 	u8 buffer3[16+16+8];
+ 	int buffer3size = 40;
+ 	sc_apdu_t apdu;
+-	const EVP_CIPHER *cipher;
++	EVP_CIPHER *cipher;
+ 
+ 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+-	// this is CBC instead of ECB
+-	cipher = EVP_des_ede3_cbc();
+-	if (!cipher) {
+-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+-	}
+ 
+ 	// select the admin key
+ 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3, INS_MANAGE_SECURITY_ENVIRONMENT, 0xC1, 0xA4);
+@@ -2008,23 +2003,28 @@ static int gids_authenticate_admin(sc_card_t *card, u8* key) {
+ 	if (ctx == NULL) {
+ 	    LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	}
+-
++	cipher = sc_evp_cipher(card->ctx, "DES-EDE3-CBC");
+ 	if (!EVP_EncryptInit(ctx, cipher, key, NULL)) {
+ 		EVP_CIPHER_CTX_free(ctx);
++		sc_evp_cipher_free(cipher);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	}
+ 	EVP_CIPHER_CTX_set_padding(ctx,0);
+ 	if (!EVP_EncryptUpdate(ctx, buffer2, &buffer2size, buffer, sizeof(buffer))) {
+ 		EVP_CIPHER_CTX_free(ctx);
++		sc_evp_cipher_free(cipher);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	}
+ 
+ 	if(!EVP_EncryptFinal(ctx, buffer2+buffer2size, &buffer2size)) {
+ 		EVP_CIPHER_CTX_free(ctx);
++		sc_evp_cipher_free(cipher);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	}
+ 	EVP_CIPHER_CTX_free(ctx);
+ 	ctx = NULL;
++	sc_evp_cipher_free(cipher);
++	cipher = NULL;
+ 	// send it to the card
+ 	sc_format_apdu(card, &apdu, SC_APDU_CASE_4, INS_GENERAL_AUTHENTICATE, 0x00, 0x00);
+ 	apdu.lc = sizeof(apduSendReponse);
+@@ -2047,36 +2047,48 @@ static int gids_authenticate_admin(sc_card_t *card, u8* key) {
+ 	if (ctx == NULL) {
+ 	    LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	}
++	cipher = sc_evp_cipher(card->ctx, "DES-EDE3-CBC");
+ 	if (!EVP_DecryptInit(ctx, cipher, key, NULL)) {
++		sc_evp_cipher_free(cipher);
+ 		EVP_CIPHER_CTX_free(ctx);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+ 	}
+ 	EVP_CIPHER_CTX_set_padding(ctx,0);
+ 	if (!EVP_DecryptUpdate(ctx, buffer3, &buffer3size, apdu.resp + 4, apdu.resplen - 4)) {
+ 		sc_log(card->ctx,  "unable to decrypt data");
++		sc_evp_cipher_free(cipher);
+ 		EVP_CIPHER_CTX_free(ctx);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_PIN_CODE_INCORRECT);
+ 	}
+ 	if(!EVP_DecryptFinal(ctx, buffer3+buffer3size, &buffer3size)) {
+ 		sc_log(card->ctx,  "unable to decrypt final data");
++		sc_evp_cipher_free(cipher);
+ 		EVP_CIPHER_CTX_free(ctx);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_PIN_CODE_INCORRECT);
+ 	}
+ 	sc_log(card->ctx,  "data has been decrypted using the key");
+ 	if (memcmp(buffer3, randomR1, 16) != 0) {
+ 		sc_log(card->ctx,  "R1 doesn't match");
++		sc_evp_cipher_free(cipher);
++		EVP_CIPHER_CTX_free(ctx);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_PIN_CODE_INCORRECT);
+ 	}
+ 	if (memcmp(buffer3 + 16, randomR2, 16) != 0) {
+ 		sc_log(card->ctx,  "R2 doesn't match");
++		sc_evp_cipher_free(cipher);
++		EVP_CIPHER_CTX_free(ctx);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_PIN_CODE_INCORRECT);
+ 	}
+ 	if (buffer[39] != 0x80) {
+ 		sc_log(card->ctx,  "Padding not found");
++		sc_evp_cipher_free(cipher);
++		EVP_CIPHER_CTX_free(ctx);
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_PIN_CODE_INCORRECT);
+ 	}
+ 	EVP_CIPHER_CTX_free(ctx);
+ 	ctx = NULL;
++	sc_evp_cipher_free(cipher);
++	cipher = NULL;
+ 
+ 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+ #endif
+
+From 04ee97407fd3fc3c968d793c05951f6b14be67ba Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:40:29 -0500
+Subject: [PATCH 10/20] Convert card GPK to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-gpk.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/src/libopensc/card-gpk.c b/src/libopensc/card-gpk.c
+index 7571e0c042..2e5673359f 100644
+--- a/src/libopensc/card-gpk.c
++++ b/src/libopensc/card-gpk.c
+@@ -733,6 +733,7 @@ gpk_compute_crycks(sc_card_t *card, sc_apdu_t *apdu,
+ 	unsigned int	len = 0, i;
+ 	int             r = SC_SUCCESS, outl;
+ 	EVP_CIPHER_CTX  *ctx = NULL;
++	EVP_CIPHER      *alg = NULL;
+ 
+ 	ctx = EVP_CIPHER_CTX_new();
+ 	if (ctx == NULL)
+@@ -756,7 +757,8 @@ gpk_compute_crycks(sc_card_t *card, sc_apdu_t *apdu,
+ 	/* Set IV */
+ 	memset(in, 0x00, 8);
+ 
+-	EVP_EncryptInit_ex(ctx, EVP_des_ede_cbc(), NULL, priv->key, in);
++	alg = sc_evp_cipher(card->ctx, "DES-EDE-CBC");
++	EVP_EncryptInit_ex(ctx, alg, NULL, priv->key, in);
+ 	for (i = 0; i < len; i += 8) {
+ 		if (!EVP_EncryptUpdate(ctx, out, &outl, &block[i], 8)) {
+ 			r = SC_ERROR_INTERNAL;
+@@ -764,6 +766,7 @@ gpk_compute_crycks(sc_card_t *card, sc_apdu_t *apdu,
+ 		}
+ 	}
+ 	EVP_CIPHER_CTX_free(ctx);
++	sc_evp_cipher_free(alg);
+ 
+ 	memcpy((u8 *) (apdu->data + apdu->datalen), out + 5, 3);
+ 	apdu->datalen += 3;
+@@ -885,11 +888,12 @@ gpk_create_file(sc_card_t *card, sc_file_t *file)
+  * Set the secure messaging key following a Select FileKey
+  */
+ static int
+-gpk_set_filekey(const u8 *key, const u8 *challenge,
++gpk_set_filekey(sc_card_t *card, const u8 *key, const u8 *challenge,
+ 		const u8 *r_rn, u8 *kats)
+ {
+ 	int			r = SC_SUCCESS, outl;
+ 	EVP_CIPHER_CTX		* ctx = NULL;
++	EVP_CIPHER		* alg = NULL;
+ 	u8                      out[16];
+ 
+ 	memcpy(out, key+8, 8);
+@@ -899,7 +903,8 @@ gpk_set_filekey(const u8 *key, const u8 *challenge,
+ 	if (ctx == NULL)
+ 		return SC_ERROR_INTERNAL;
+ 
+-	EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, key, NULL);
++	alg = sc_evp_cipher(card->ctx, "DES-EDE");
++	EVP_EncryptInit_ex(ctx, alg, NULL, key, NULL);
+ 	if (!EVP_EncryptUpdate(ctx, kats, &outl, r_rn+4, 8))
+ 		r = SC_ERROR_INTERNAL;
+ 
+@@ -907,7 +912,7 @@ gpk_set_filekey(const u8 *key, const u8 *challenge,
+ 		r = SC_ERROR_INTERNAL;
+ 	if (r == SC_SUCCESS) {
+ 		EVP_CIPHER_CTX_reset(ctx);
+-		EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, out, NULL);
++		EVP_EncryptInit_ex(ctx, alg, NULL, out, NULL);
+ 		if (!EVP_EncryptUpdate(ctx, kats+8, &outl, r_rn+4, 8))
+ 			r = SC_ERROR_INTERNAL;
+ 	if (!EVP_CIPHER_CTX_reset(ctx))
+@@ -921,13 +926,14 @@ gpk_set_filekey(const u8 *key, const u8 *challenge,
+ 	 */
+ 	if (r == SC_SUCCESS) {
+ 		EVP_CIPHER_CTX_reset(ctx);
+-		EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, kats, NULL);
++		EVP_EncryptInit_ex(ctx, alg, NULL, kats, NULL);
+ 		if (!EVP_EncryptUpdate(ctx, out, &outl, challenge, 8))
+ 			r = SC_ERROR_INTERNAL;
+ 		if (memcmp(r_rn, out+4, 4) != 0)
+ 			r = SC_ERROR_INVALID_ARGUMENTS;
+ 	}
+ 
++	sc_evp_cipher_free(alg);
+ 	if (ctx)
+ 	    EVP_CIPHER_CTX_free(ctx);
+ 
+@@ -974,7 +980,7 @@ gpk_select_key(sc_card_t *card, int key_sfi, const u8 *buf, size_t buflen)
+ 	if (apdu.resplen != 12) {
+ 		r = SC_ERROR_UNKNOWN_DATA_RECEIVED;
+ 	} else
+-	if ((r = gpk_set_filekey(buf, rnd, resp, priv->key)) == 0) {
++	if ((r = gpk_set_filekey(card, buf, rnd, resp, priv->key)) == 0) {
+ 		priv->key_set = 1;
+ 		priv->key_reference = key_sfi;
+ 	}
+@@ -1521,6 +1527,7 @@ gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
+ 	u8		temp[256];
+ 	int		r = SC_SUCCESS, outl;
+ 	EVP_CIPHER_CTX  * ctx;
++	EVP_CIPHER      * alg;
+ 
+ 	sc_log(card->ctx,  "gpk_pkfile_load(fid=%04x, len=%d, datalen=%d)\n",
+ 			args->file->id, args->len, args->datalen);
+@@ -1549,6 +1556,7 @@ gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
+ 		return SC_ERROR_SECURITY_STATUS_NOT_SATISFIED;
+ 	}
+ 
++	alg = sc_evp_cipher(card->ctx, "DES-EDE");
+ 	EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, priv->key, NULL);
+ 	for (n = 0; n < args->datalen; n += 8) {
+ 		if (!EVP_EncryptUpdate(ctx, temp+n, &outl, args->data + n, 8)) {
+@@ -1556,6 +1564,7 @@ gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
+ 			break;
+ 		}
+ 	}
++	sc_evp_cipher_free(alg);
+ 	if (ctx)
+ 		EVP_CIPHER_CTX_free(ctx);
+ 	if (r != SC_SUCCESS)
+
+From fdfb50cf2e54871bdc929b6e5a40730ca1cae4d8 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:42:47 -0500
+Subject: [PATCH 11/20] Convert card IASECC to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-iasecc.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/src/libopensc/card-iasecc.c b/src/libopensc/card-iasecc.c
+index 1347ed2393..d8c0863b99 100644
+--- a/src/libopensc/card-iasecc.c
++++ b/src/libopensc/card-iasecc.c
+@@ -3169,7 +3169,7 @@ iasecc_qsign_data_sha1(struct sc_context *ctx, const unsigned char *in, size_t i
+ 
+ 	int r = SC_ERROR_INTERNAL;
+ 	EVP_MD_CTX *mdctx = NULL;
+-	const EVP_MD *md = NULL;
++	EVP_MD *md = NULL;
+ 	SHA_CTX *md_data = NULL;
+ 	unsigned int md_out_len;
+ 	SHA_LONG pre_hash_Nl, *hh[5] = {NULL, NULL, NULL, NULL, NULL};
+@@ -3186,9 +3186,9 @@ iasecc_qsign_data_sha1(struct sc_context *ctx, const unsigned char *in, size_t i
+ 	       in_len);
+ 	memset(out, 0, sizeof(struct iasecc_qsign_data));
+ 
+-	md = EVP_get_digestbyname("SHA1");
++	md = sc_evp_md(ctx, "SHA1");
+ 	mdctx = EVP_MD_CTX_new();
+-        if (EVP_DigestInit_ex(mdctx, md, NULL) != 1) {
++	if (EVP_DigestInit_ex(mdctx, md, NULL) != 1) {
+ 		sc_log(ctx, "EVP_DigestInit_ex failed");
+ 		goto err;
+ 	}
+@@ -3250,6 +3250,7 @@ iasecc_qsign_data_sha1(struct sc_context *ctx, const unsigned char *in, size_t i
+ 		ERR_print_errors_fp(ctx->debug_file);
+ end:
+ 	EVP_MD_CTX_free(mdctx);
++	sc_evp_md_free(md);
+ 
+ 	LOG_FUNC_RETURN(ctx, r);
+ 
+@@ -3267,7 +3268,7 @@ iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t
+ 
+ 	int r = SC_ERROR_INTERNAL;
+ 	EVP_MD_CTX *mdctx = NULL;
+-	const EVP_MD *md = NULL;
++	EVP_MD *md = NULL;
+ 	SHA256_CTX *md_data;
+ 	unsigned int md_out_len;
+ 
+@@ -3284,7 +3285,7 @@ iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t
+ 	       in_len);
+ 	memset(out, 0, sizeof(struct iasecc_qsign_data));
+ 
+-	md = EVP_get_digestbyname("SHA256");
++	md = sc_evp_md(ctx, "SHA256");
+ 	mdctx = EVP_MD_CTX_new();
+ 	if (EVP_DigestInit_ex(mdctx, md, NULL) != 1) {
+ 		sc_log(ctx, "EVP_DigestInit_ex failed");
+@@ -3342,6 +3343,7 @@ iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t
+ 		ERR_print_errors_fp(ctx->debug_file);
+ end:
+ 	EVP_MD_CTX_free(mdctx);
++	sc_evp_md_free(md);
+ 
+ 	LOG_FUNC_RETURN(ctx, r);
+ 
+
+From a7dc2ae2290f9b760bf38ccef510293ea6aa15bd Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:45:15 -0500
+Subject: [PATCH 12/20] Convert card oberthur to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-oberthur.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/libopensc/card-oberthur.c b/src/libopensc/card-oberthur.c
+index 1fc40f7b35..35312ed0d5 100644
+--- a/src/libopensc/card-oberthur.c
++++ b/src/libopensc/card-oberthur.c
+@@ -1336,6 +1336,7 @@ auth_update_component(struct sc_card *card, struct auth_update_component_info *a
+ 		const unsigned char in[8] = {0,0,0,0,0,0,0,0};
+ 		unsigned char out[8];
+ 		EVP_CIPHER_CTX  * ctx = NULL;
++		EVP_CIPHER *alg = NULL;
+ 
+ 		if (args->len!=8 && args->len!=24)
+ 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
+@@ -1346,11 +1347,13 @@ auth_update_component(struct sc_card *card, struct auth_update_component_info *a
+ 
+ 		p2 = 0;
+ 		if (args->len == 24)
+-			EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, args->data, NULL);
++			alg = sc_evp_cipher(card->ctx, "DES-EDE");
+ 		else
+-			EVP_EncryptInit_ex(ctx, EVP_des_ecb(), NULL, args->data, NULL);
++			alg = sc_evp_cipher(card->ctx, "DES-ECB");
++		EVP_EncryptInit_ex(ctx, alg, NULL, args->data, NULL);
+ 		rv = EVP_EncryptUpdate(ctx, out, &outl, in, 8);
+ 		EVP_CIPHER_CTX_free(ctx);
++		sc_evp_cipher_free(alg);
+ 		if (rv == 0) {
+ 			sc_log(card->ctx, "OpenSSL encryption error.");
+ 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+
+From 3a505e2217499729c52319bdb26fea93a4fdf5ec Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:53:37 -0500
+Subject: [PATCH 13/20] Convert card PIV to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-piv.c | 34 +++++++++++++++++++++++-----------
+ 1 file changed, 23 insertions(+), 11 deletions(-)
+
+diff --git a/src/libopensc/card-piv.c b/src/libopensc/card-piv.c
+index dffb9e3ebc..aadd4ec242 100644
+--- a/src/libopensc/card-piv.c
++++ b/src/libopensc/card-piv.c
+@@ -1428,17 +1428,27 @@ static int piv_write_binary(sc_card_t *card, unsigned int idx,
+  */
+ 
+ #ifdef ENABLE_OPENSSL
+-static const EVP_CIPHER *get_cipher_for_algo(int alg_id)
++static EVP_CIPHER *get_cipher_for_algo(sc_card_t *card, int alg_id)
+ {
++	const char *algo;
+ 	switch (alg_id) {
+-		case 0x0: return EVP_des_ede3_ecb();
+-		case 0x1: return EVP_des_ede3_ecb(); /* 2TDES */
+-		case 0x3: return EVP_des_ede3_ecb();
+-		case 0x8: return EVP_aes_128_ecb();
+-		case 0xA: return EVP_aes_192_ecb();
+-		case 0xC: return EVP_aes_256_ecb();
++		case 0x0:
++		case 0x1: /* 2TDES */
++		case 0x3:
++			algo = "DES-EDE3-ECB";
++			break;
++		case 0x8:
++			algo = "AES-128-ECB";
++			break;
++		case 0xA:
++			algo = "AES-192-ECB";
++			break;
++		case 0xC:
++			algo = "AES-256-ECB";
++			break;
+ 		default: return NULL;
+ 	}
++	return sc_evp_cipher(card->ctx, algo);
+ }
+ 
+ static int get_keylen(unsigned int alg_id, size_t *size)
+@@ -1604,7 +1614,7 @@ static int piv_general_mutual_authenticate(sc_card_t *card,
+ 	EVP_CIPHER_CTX * ctx = NULL;
+ 
+ 	u8 sbuf[255];
+-	const EVP_CIPHER *cipher;
++	EVP_CIPHER *cipher = NULL;
+ 
+ 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+ 
+@@ -1614,7 +1624,7 @@ static int piv_general_mutual_authenticate(sc_card_t *card,
+ 		goto err;
+ 	}
+ 
+-	cipher = get_cipher_for_algo(alg_id);
++	cipher = get_cipher_for_algo(card, alg_id);
+ 	if(!cipher) {
+ 		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Invalid cipher selector, none found for:  %02x\n", alg_id);
+ 		r = SC_ERROR_INVALID_ARGUMENTS;
+@@ -1850,6 +1860,7 @@ static int piv_general_mutual_authenticate(sc_card_t *card,
+ 	r = SC_SUCCESS;
+ 
+ err:
++	sc_evp_cipher_free(cipher);
+ 	if (ctx)
+ 		EVP_CIPHER_CTX_free(ctx);
+ 	if (locked)
+@@ -1897,7 +1908,7 @@ static int piv_general_external_authenticate(sc_card_t *card,
+ 	size_t cypher_text_len = 0;
+ 	u8 sbuf[255];
+ 	EVP_CIPHER_CTX * ctx = NULL;
+-	const EVP_CIPHER *cipher;
++	EVP_CIPHER *cipher = NULL;
+ 
+ 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+ 
+@@ -1909,7 +1920,7 @@ static int piv_general_external_authenticate(sc_card_t *card,
+ 
+ 	sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Selected cipher for algorithm id: %02x\n", alg_id);
+ 
+-	cipher = get_cipher_for_algo(alg_id);
++	cipher = get_cipher_for_algo(card, alg_id);
+ 	if(!cipher) {
+ 		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Invalid cipher selector, none found for:  %02x\n", alg_id);
+ 		r = SC_ERROR_INVALID_ARGUMENTS;
+@@ -2059,6 +2070,7 @@ static int piv_general_external_authenticate(sc_card_t *card,
+ 	sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Got response  challenge\n");
+ 
+ err:
++	sc_evp_cipher_free(cipher);
+ 	if (ctx)
+ 		EVP_CIPHER_CTX_free(ctx);
+ 
+
+From 600695ca5b8cec95330567fe1bfaa07e1609c8d0 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 16:59:16 -0500
+Subject: [PATCH 14/20] Convert card westcos to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/card-westcos.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/libopensc/card-westcos.c b/src/libopensc/card-westcos.c
+index 633d471d73..108599336b 100644
+--- a/src/libopensc/card-westcos.c
++++ b/src/libopensc/card-westcos.c
+@@ -659,6 +659,7 @@ static int westcos_get_crypte_challenge(sc_card_t * card, const u8 * key,
+ 	int r;
+ #ifdef ENABLE_OPENSSL
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	int tmplen = 0;
+ 	if ((cctx = EVP_CIPHER_CTX_new()) == NULL)
+ 		return SC_ERROR_INTERNAL;
+@@ -671,19 +672,25 @@ static int westcos_get_crypte_challenge(sc_card_t * card, const u8 * key,
+ 	if (r)
+ 		return r;
+ #ifdef ENABLE_OPENSSL
+-	if (EVP_EncryptInit_ex(cctx, EVP_des_ede_ecb(), NULL, key, NULL) != 1 ||
++	if ((cctx = EVP_CIPHER_CTX_new()) == NULL)
++		return SC_ERROR_INTERNAL;
++	alg = sc_evp_cipher(card->ctx, "DES-EDE-ECB");
++	if (EVP_EncryptInit_ex(cctx, alg, NULL, key, NULL) != 1 ||
+ 		EVP_CIPHER_CTX_set_padding(cctx,0) != 1 ||
+ 		EVP_EncryptUpdate(cctx, result, &tmplen, buf, *len) != 1) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+ 	}
+ 	*len = tmplen;
+ 	if (EVP_EncryptFinal_ex(cctx, result + tmplen, &tmplen)  != 1) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+     }
+ 	*len += tmplen;
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ 	return SC_SUCCESS;
+ #else
+ 	return SC_ERROR_NOT_SUPPORTED;
+@@ -1185,7 +1192,11 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
+ 		idx += r;
+ 	} while (1);
+ 	BIO_set_mem_eof_return(mem, -1);
++#if OPENSSL_VERSION_NUMBER < 0x30000000L
+ 	if (!(pkey = d2i_PrivateKey_bio(mem, NULL))) {
++#else
++	if (!(pkey = d2i_PrivateKey_ex_bio(mem, NULL, card->ctx->ossl3ctx->libctx, NULL))) {
++#endif
+ 		sc_log(card->ctx, 
+ 			"RSA key invalid, %lu\n", ERR_get_error());
+ 		r = SC_ERROR_UNKNOWN;
+
+From febaf33f2a3a382852293f5ec8fd7e62b86d8eb8 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 17:17:03 -0500
+Subject: [PATCH 15/20] Convert padding.c to use openssllibctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/libopensc/padding.c | 90 ++++++++++++++++++++++++++---------------
+ 1 file changed, 57 insertions(+), 33 deletions(-)
+
+diff --git a/src/libopensc/padding.c b/src/libopensc/padding.c
+index 826e726783..17745d61a4 100644
+--- a/src/libopensc/padding.c
++++ b/src/libopensc/padding.c
+@@ -231,8 +231,8 @@ static int mgf1(u8 *mask, size_t len, u8 *seed, size_t seedLen, const EVP_MD *dg
+ }
+ 
+ /* forward declarations */
+-static const EVP_MD *mgf1_flag2md(unsigned int mgf1);
+-static const EVP_MD *hash_flag2md(unsigned int hash);
++static EVP_MD *mgf1_flag2md(sc_context_t *ctx, unsigned int mgf1);
++static EVP_MD *hash_flag2md(sc_context_t *ctx, unsigned int hash);
+ 
+ /* check/remove OAEP - RFC 8017 padding */
+ int sc_pkcs1_strip_oaep_padding(sc_context_t *ctx, u8 *data, size_t len, unsigned long flags, uint8_t *param, size_t paramlen)
+@@ -240,7 +240,7 @@ int sc_pkcs1_strip_oaep_padding(sc_context_t *ctx, u8 *data, size_t len, unsigne
+ 	size_t i,j;
+ 	size_t mdlen, dblen;
+ 	u8 seed[EVP_MAX_MD_SIZE];
+-	const EVP_MD *mgf1_md, *hash_md;
++	EVP_MD *mgf1_md = NULL, *hash_md = NULL;
+ 	u8 db[512];		/* up to RSA 4096 */
+ 	u8 label[EVP_MAX_MD_SIZE];
+ 	EVP_MD_CTX *md_ctx;
+@@ -251,7 +251,7 @@ int sc_pkcs1_strip_oaep_padding(sc_context_t *ctx, u8 *data, size_t len, unsigne
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+ 
+ 	/* https://www.rfc-editor.org/rfc/pdfrfc/rfc8017.txt.pdf, page 26, 3.a. */
+-	hash_md = hash_flag2md(flags);
++	hash_md = hash_flag2md(ctx, flags);
+ 	if (!hash_md)
+ 		return SC_ERROR_NOT_SUPPORTED;
+ 
+@@ -263,32 +263,45 @@ int sc_pkcs1_strip_oaep_padding(sc_context_t *ctx, u8 *data, size_t len, unsigne
+ 			hash_len = 0;
+ 		EVP_MD_CTX_free(md_ctx);
+ 	}
++	sc_evp_md_free(hash_md);
++	hash_md = NULL;
+ 	if (!hash_len)
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+ 
+-	mgf1_md = mgf1_flag2md(flags);
++	mgf1_md = mgf1_flag2md(ctx, flags);
+ 	if (!mgf1_md)
+ 		return SC_ERROR_NOT_SUPPORTED;
+ 
+ 	mdlen = EVP_MD_size(mgf1_md);
+ 
+-	if (len < 2 * mdlen + 2)
++	if (len < 2 * mdlen + 2) {
++		sc_evp_md_free(mgf1_md);
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_PADDING);
++	}
+ 
+-	if (*data != 0)
++	if (*data != 0) {
++		sc_evp_md_free(mgf1_md);
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_PADDING);
++	}
+ 
+ 	dblen = len - 1 - mdlen;
+-	if (dblen > sizeof(db))
++	if (dblen > sizeof(db)) {
++		sc_evp_md_free(mgf1_md);
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
++	}
+ 
+-	if (mgf1(seed, mdlen, data + mdlen + 1, dblen, mgf1_md))
++	if (mgf1(seed, mdlen, data + mdlen + 1, dblen, mgf1_md)) {
++		sc_evp_md_free(mgf1_md);
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
++	}
+ 	for (i = 0; i < mdlen; i++)
+ 		seed[i] ^= data[i + 1];
+ 
+-	if (mgf1(db, dblen, seed, mdlen, mgf1_md))
++	if (mgf1(db, dblen, seed, mdlen, mgf1_md)) {
++		sc_evp_md_free(mgf1_md);
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
++	}
++	sc_evp_md_free(mgf1_md);
+ 	for (i = 0; i < dblen; i++) {
+ 		db[i] ^= data[i + mdlen + 1];
+ 		/* clear lHash' if same as lHash */
+@@ -369,37 +382,37 @@ int sc_pkcs1_strip_digest_info_prefix(unsigned int *algorithm,
+ 
+ #ifdef ENABLE_OPENSSL
+ 
+-static const EVP_MD* hash_flag2md(unsigned int hash)
++static EVP_MD* hash_flag2md(sc_context_t *ctx, unsigned int hash)
+ {
+ 	switch (hash & SC_ALGORITHM_RSA_HASHES) {
+ 	case SC_ALGORITHM_RSA_HASH_SHA1:
+-		return EVP_sha1();
++		return sc_evp_md(ctx, "SHA1");
+ 	case SC_ALGORITHM_RSA_HASH_SHA224:
+-		return EVP_sha224();
++		return sc_evp_md(ctx, "SHA224");
+ 	case SC_ALGORITHM_RSA_HASH_SHA256:
+-		return EVP_sha256();
++		return sc_evp_md(ctx, "SHA256");
+ 	case SC_ALGORITHM_RSA_HASH_SHA384:
+-		return EVP_sha384();
++		return sc_evp_md(ctx, "SHA384");
+ 	case SC_ALGORITHM_RSA_HASH_SHA512:
+-		return EVP_sha512();
++		return sc_evp_md(ctx, "SHA512");
+ 	default:
+ 		return NULL;
+ 	}
+ }
+ 
+-static const EVP_MD* mgf1_flag2md(unsigned int mgf1)
++static EVP_MD* mgf1_flag2md(sc_context_t *ctx, unsigned int mgf1)
+ {
+ 	switch (mgf1 & SC_ALGORITHM_MGF1_HASHES) {
+ 	case SC_ALGORITHM_MGF1_SHA1:
+-		return EVP_sha1();
++		return sc_evp_md(ctx, "SHA1");
+ 	case SC_ALGORITHM_MGF1_SHA224:
+-		return EVP_sha224();
++		return sc_evp_md(ctx, "SHA224");
+ 	case SC_ALGORITHM_MGF1_SHA256:
+-		return EVP_sha256();
++		return sc_evp_md(ctx, "SHA256");
+ 	case SC_ALGORITHM_MGF1_SHA384:
+-		return EVP_sha384();
++		return sc_evp_md(ctx, "SHA384");
+ 	case SC_ALGORITHM_MGF1_SHA512:
+-		return EVP_sha512();
++		return sc_evp_md(ctx, "SHA512");
+ 	default:
+ 		return NULL;
+ 	}
+@@ -408,13 +421,13 @@ static const EVP_MD* mgf1_flag2md(unsigned int mgf1)
+ /* large enough up to RSA 4096 */
+ #define PSS_MAX_SALT_SIZE 512
+ /* add PKCS#1 v2.0 PSS padding */
+-static int sc_pkcs1_add_pss_padding(unsigned int hash, unsigned int mgf1_hash,
++static int sc_pkcs1_add_pss_padding(sc_context_t *scctx, unsigned int hash, unsigned int mgf1_hash,
+     const u8 *in, size_t in_len, u8 *out, size_t *out_len, size_t mod_bits, size_t sLen)
+ {
+ 	/* hLen = sLen in our case */
+ 	int rv = SC_ERROR_INTERNAL, i, j, hlen, dblen, plen, round, mgf_rounds;
+ 	int mgf1_hlen;
+-	const EVP_MD* md, *mgf1_md;
++	EVP_MD* md = NULL, *mgf1_md = NULL;
+ 	EVP_MD_CTX* ctx = NULL;
+ 	u8 buf[8];
+ 	u8 salt[PSS_MAX_SALT_SIZE], mask[EVP_MAX_MD_SIZE];
+@@ -423,22 +436,30 @@ static int sc_pkcs1_add_pss_padding(unsigned int hash, unsigned int mgf1_hash,
+ 	if (*out_len < mod_length)
+ 		return SC_ERROR_BUFFER_TOO_SMALL;
+ 
+-	md = hash_flag2md(hash);
++	md = hash_flag2md(scctx, hash);
+ 	if (md == NULL)
+ 		return SC_ERROR_NOT_SUPPORTED;
+ 	hlen = EVP_MD_size(md);
+ 	dblen = mod_length - hlen - 1; /* emLen - hLen - 1 */
+ 	plen = mod_length - sLen - hlen - 1;
+-	if (in_len != (unsigned)hlen)
++	if (in_len != (unsigned)hlen) {
++		sc_evp_md_free(md);
+ 		return SC_ERROR_INVALID_ARGUMENTS;
+-	if (sLen + (unsigned)hlen + 2 > mod_length)
++	}
++	if (sLen + (unsigned)hlen + 2 > mod_length) {
+ 		/* RSA key too small for chosen hash (1296 bits or higher needed for
+ 		 * signing SHA-512 hashes) */
++		sc_evp_md_free(md);
+ 		return SC_ERROR_NOT_SUPPORTED;
+-	if (sLen > PSS_MAX_SALT_SIZE)
++	}
++	if (sLen > PSS_MAX_SALT_SIZE) {
++		sc_evp_md_free(md);
+ 		return SC_ERROR_INVALID_ARGUMENTS;
+-	if (RAND_bytes(salt, sLen) != 1)
++	}
++	if (RAND_bytes(salt, sLen) != 1) {
++		sc_evp_md_free(md);
+ 		return SC_ERROR_INTERNAL;
++	}
+ 
+ 	/* Hash M' to create H */
+ 	if (!(ctx = EVP_MD_CTX_create()))
+@@ -464,7 +485,7 @@ static int sc_pkcs1_add_pss_padding(unsigned int hash, unsigned int mgf1_hash,
+ 	 *  *the first part is masked later */
+ 
+ 	/* Construct the DB mask block by block and XOR it in. */
+-	mgf1_md = mgf1_flag2md(mgf1_hash);
++	mgf1_md = mgf1_flag2md(scctx, mgf1_hash);
+ 	if (mgf1_md == NULL)
+ 		return SC_ERROR_NOT_SUPPORTED;
+ 	mgf1_hlen = EVP_MD_size(mgf1_md);
+@@ -499,6 +520,8 @@ static int sc_pkcs1_add_pss_padding(unsigned int hash, unsigned int mgf1_hash,
+ done:
+ 	OPENSSL_cleanse(salt, sizeof(salt));
+ 	OPENSSL_cleanse(mask, sizeof(mask));
++	sc_evp_md_free(md);
++	sc_evp_md_free(mgf1_md);
+ 	if (ctx) {
+ 		EVP_MD_CTX_destroy(ctx);
+ 	}
+@@ -537,7 +560,7 @@ int sc_pkcs1_encode(sc_context_t *ctx, unsigned long flags,
+ 	size_t mod_len = (mod_bits + 7) / 8;
+ #ifdef ENABLE_OPENSSL
+ 	size_t sLen;
+-	const EVP_MD* md;
++	EVP_MD* md = NULL;
+ 	unsigned int mgf1_hash;
+ #endif
+ 
+@@ -586,9 +609,10 @@ int sc_pkcs1_encode(sc_context_t *ctx, unsigned long flags,
+ 			hash_algo = hash_len2algo(tmp_len);
+ 		}
+ 		/* sLen is by default same as hash length */
+-		if (!(md = hash_flag2md(hash_algo)))
++		if (!(md = hash_flag2md(ctx, hash_algo)))
+ 			return SC_ERROR_NOT_SUPPORTED;
+ 		sLen = EVP_MD_size(md);
++		sc_evp_md_free(md);
+ 		/* if application provide sLen, use it */
+ 		if (pMechanism != NULL) {
+ 			CK_MECHANISM *mech = (CK_MECHANISM *)pMechanism;
+@@ -598,7 +622,7 @@ int sc_pkcs1_encode(sc_context_t *ctx, unsigned long flags,
+ 				sLen = pss_params->sLen;
+ 			}
+ 		}
+-		rv = sc_pkcs1_add_pss_padding(hash_algo, mgf1_hash,
++		rv = sc_pkcs1_add_pss_padding(ctx, hash_algo, mgf1_hash,
+ 		    tmp, tmp_len, out, out_len, mod_bits, sLen);
+ #else
+ 		rv = SC_ERROR_NOT_SUPPORTED;
+
+From cabcb2130243c5c67c6f79f0e153eee17c2fe464 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 17:51:52 -0500
+Subject: [PATCH 16/20] Convert pkcs15-westcos.c to use OpenSSL libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/pkcs15init/pkcs15-westcos.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/pkcs15init/pkcs15-westcos.c b/src/pkcs15init/pkcs15-westcos.c
+index fb8f8bda83..6f55c90744 100644
+--- a/src/pkcs15init/pkcs15-westcos.c
++++ b/src/pkcs15init/pkcs15-westcos.c
+@@ -235,7 +235,11 @@ static int westcos_pkcs15init_generate_key(sc_profile_t *profile,
+ 		return SC_ERROR_NOT_SUPPORTED;
+ 	}
+ 
++#if OPENSSL_VERSION_NUMBER < 0x30000000L
+ 	pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
++#else
++	pctx = EVP_PKEY_CTX_new_from_name(profile->card->ctx->ossl3ctx->libctx, "RSA", NULL);
++#endif
+ 	mem = BIO_new(BIO_s_mem());
+ 	bn = BN_new();
+ 	if (pctx == NULL || mem == NULL || bn == NULL) {
+
+From bfdb928ba49a0bde84ab0aa74934e01551fb836b Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 18:05:10 -0500
+Subject: [PATCH 17/20] Remove call to load legacy provider from libsm
+
+Library code should *never* arbitrarily load the legacy provider in the
+default application context. It may literally break or make an
+application vulnerable by sneaking in unexpected algorithms.
+
+This is not needed anymore given we will use an opensc specific context
+that will not affect the rest of the application (or other libraries).
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/sm/sm-common.c | 13 -------------
+ 1 file changed, 13 deletions(-)
+
+diff --git a/src/sm/sm-common.c b/src/sm/sm-common.c
+index caada2b7ee..af16d44cab 100644
+--- a/src/sm/sm-common.c
++++ b/src/sm/sm-common.c
+@@ -122,13 +122,6 @@ DES_3cbc_encrypt(sm_des_cblock *input, sm_des_cblock *output, long length,
+ 	}
+ 	memcpy(*iv,icv_out,sizeof(sm_des_cblock));
+ }
+-#else
+-#include <openssl/provider.h>
+-
+-/* The single-DES algorithm is not available in the default provider anymore
+- * so we need to load the legacy provider. This is not done on the application
+- * start, but only as needed */
+-static OSSL_PROVIDER *legacy_provider = NULL;
+ #endif
+ 
+ 
+@@ -206,12 +199,6 @@ DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
+ 
+ 	cctx = EVP_CIPHER_CTX_new();
+ 	if (l > 8) {
+-		if (!legacy_provider) {
+-			if (!(legacy_provider = OSSL_PROVIDER_try_load(NULL, "legacy", 1))) {
+-				EVP_CIPHER_CTX_free(cctx);
+-				return SC_ERROR_INTERNAL;
+-			}
+-		}
+ 		if (!EVP_EncryptInit_ex2(cctx, EVP_des_cbc(), key, iv, NULL)) {
+ 			EVP_CIPHER_CTX_free(cctx);
+ 			return SC_ERROR_INTERNAL;
+
+From 432c7ab2c58c56cb7251c68067e09a8edf880806 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Wed, 15 Feb 2023 18:27:08 -0500
+Subject: [PATCH 18/20] Convert libsm to use openssl libctx
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/sm/sm-common.c           | 56 +++++++++++++++++++++++++++------
+ src/sm/sm-common.h           |  9 ++++--
+ src/smm/sm-card-authentic.c  |  2 +-
+ src/smm/sm-cwa14890.c        |  2 +-
+ src/smm/sm-global-platform.c | 18 +++++------
+ src/smm/sm-module.h          |  7 +++--
+ src/tests/unittests/sm.c     | 60 ++++++++++++++++++------------------
+ 7 files changed, 99 insertions(+), 55 deletions(-)
+
+diff --git a/src/sm/sm-common.c b/src/sm/sm-common.c
+index af16d44cab..c488c50e33 100644
+--- a/src/sm/sm-common.c
++++ b/src/sm/sm-common.c
+@@ -47,6 +47,7 @@
+ #include "libopensc/opensc.h"
+ #include "libopensc/asn1.h"
+ #include "libopensc/log.h"
++#include "libopensc/sc-ossl-compat.h"
+ 
+ #include "sm-common.h"
+ 
+@@ -126,7 +127,8 @@ DES_3cbc_encrypt(sm_des_cblock *input, sm_des_cblock *output, long length,
+ 
+ 
+ unsigned int
+-DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
++DES_cbc_cksum_3des_emv96(struct sc_context *ctx,
++			 const unsigned char *in, sm_des_cblock *output,
+ 			   long length, unsigned char *key,
+ 			   sm_const_des_cblock *ivec)
+ {
+@@ -191,6 +193,7 @@ DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
+ 	return(tout1);
+ #else
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	unsigned char outv[8], tmpout[4];
+ 	int tmplen;
+ 
+@@ -199,8 +202,10 @@ DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
+ 
+ 	cctx = EVP_CIPHER_CTX_new();
+ 	if (l > 8) {
+-		if (!EVP_EncryptInit_ex2(cctx, EVP_des_cbc(), key, iv, NULL)) {
++		alg = sc_evp_cipher(ctx, "DES-CBC");
++		if (!EVP_EncryptInit_ex2(cctx, alg, key, iv, NULL)) {
+ 			EVP_CIPHER_CTX_free(cctx);
++			sc_evp_cipher_free(alg);
+ 			return SC_ERROR_INTERNAL;
+ 		}
+ 		/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+@@ -208,29 +213,37 @@ DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
+ 		for (; l > 8; l -= 8, in += 8) {
+ 			if (!EVP_EncryptUpdate(cctx, outv, &tmplen, in, 8)) {
+ 				EVP_CIPHER_CTX_free(cctx);
++				sc_evp_cipher_free(alg);
+ 				return SC_ERROR_INTERNAL;
+ 			}
+ 		}
+ 		if (!EVP_EncryptFinal_ex(cctx, outv + tmplen, &tmplen)) {
+ 			EVP_CIPHER_CTX_free(cctx);
++			sc_evp_cipher_free(alg);
+ 			return SC_ERROR_INTERNAL;
+ 		}
++		sc_evp_cipher_free(alg);
++		alg = NULL;
+ 	}
+ 
+ 	/* We need to return first 4 bytes from here */
+ 	memcpy(tmpout, outv, 4);
+-	if (!EVP_EncryptInit_ex2(cctx, EVP_des_ede_cbc(), key, outv, NULL)) {
++	alg = sc_evp_cipher(ctx, "DES-EDE-CBC");
++	if (!EVP_EncryptInit_ex2(cctx, alg, key, outv, NULL)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+ 	}
+ 	/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+ 	EVP_CIPHER_CTX_set_padding(cctx, 0);
+ 	if (!EVP_EncryptUpdate(cctx, outv, &tmplen, in, l)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+ 	}
+ 	if (!EVP_EncryptFinal_ex(cctx, outv + tmplen, &tmplen)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+ 	}
+ 	if (out != NULL) {
+@@ -238,6 +251,7 @@ DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
+ 		memcpy(out+4, outv+4, 4);
+ 	}
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ 	return ((outv[7] << 0L)  & 0x000000FF) |
+ 	       ((outv[6] << 8L)  & 0x0000FF00) |
+ 	       ((outv[5] << 16L) & 0x00FF0000) |
+@@ -247,7 +261,8 @@ DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
+ 
+ 
+ unsigned int
+-DES_cbc_cksum_3des(const unsigned char *in, sm_des_cblock *output,
++DES_cbc_cksum_3des(struct sc_context *ctx,
++		   const unsigned char *in, sm_des_cblock *output,
+ 		       long length, unsigned char *key,
+ 		       sm_const_des_cblock *ivec)
+ {
+@@ -302,6 +317,7 @@ DES_cbc_cksum_3des(const unsigned char *in, sm_des_cblock *output,
+ 	return(tout1);
+ #else
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	unsigned char outv[8];
+ 	int tmplen = 0;
+ 
+@@ -309,8 +325,10 @@ DES_cbc_cksum_3des(const unsigned char *in, sm_des_cblock *output,
+ 	memcpy(outv, iv, sizeof outv);
+ 
+ 	cctx = EVP_CIPHER_CTX_new();
+-	if (!EVP_EncryptInit_ex2(cctx, EVP_des_ede_cbc(), key, iv, NULL)) {
++	alg = sc_evp_cipher(ctx, "DES-EDE-CBC");
++	if (!EVP_EncryptInit_ex2(cctx, alg, key, iv, NULL)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+ 	}
+ 	/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+@@ -318,17 +336,20 @@ DES_cbc_cksum_3des(const unsigned char *in, sm_des_cblock *output,
+ 	for (; l > 0; l -= 8, in += 8) {
+ 		if (!EVP_EncryptUpdate(cctx, outv, &tmplen, in, 8)) {
+ 			EVP_CIPHER_CTX_free(cctx);
++			sc_evp_cipher_free(alg);
+ 			return SC_ERROR_INTERNAL;
+ 		}
+ 	}
+ 	if (!EVP_EncryptFinal_ex(cctx, outv + tmplen, &tmplen)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		return SC_ERROR_INTERNAL;
+ 	}
+ 	if (out != NULL) {
+ 		memcpy(out, outv, sizeof outv);
+ 	}
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ 	return ((outv[7] << 0L)  & 0x000000FF) |
+ 	       ((outv[6] << 8L)  & 0x0000FF00) |
+ 	       ((outv[5] << 16L) & 0x00FF0000) |
+@@ -338,7 +359,8 @@ DES_cbc_cksum_3des(const unsigned char *in, sm_des_cblock *output,
+ 
+ 
+ int
+-sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
++sm_encrypt_des_ecb3(struct sc_context *ctx,
++		unsigned char *key, unsigned char *data, int data_len,
+ 		unsigned char **out, int *out_len)
+ {
+ #if OPENSSL_VERSION_NUMBER < 0x30000000L
+@@ -347,6 +369,7 @@ sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
+ 	DES_key_schedule ks,ks2;
+ #else
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	int tmplen;
+ #endif
+ 
+@@ -377,7 +400,8 @@ sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
+ 	if (cctx == NULL) {
+ 		goto err;
+ 	}
+-	if (!EVP_EncryptInit_ex2(cctx, EVP_des_ede_ecb(), key, NULL, NULL)) {
++	alg = sc_evp_cipher(ctx, "DES-EDE-ECB");
++	if (!EVP_EncryptInit_ex2(cctx, alg, key, NULL, NULL)) {
+ 		goto err;
+ 	}
+ 	/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+@@ -392,10 +416,12 @@ sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
+ 	}
+ 	*out_len += tmplen;
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ 	return SC_SUCCESS;
+ 
+ err:
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ 	free(*out);
+ 	return SC_ERROR_INTERNAL;
+ #endif
+@@ -415,6 +441,7 @@ sm_decrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ #else
+ 	unsigned char icv[] = {0x00 ,0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	int tmplen;
+ #endif
+ 
+@@ -441,24 +468,29 @@ sm_decrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ 				(sm_des_cblock *)(*out + st), 8, &ks, &ks2, &icv, DES_DECRYPT);
+ #else
+ 	cctx = EVP_CIPHER_CTX_new();
+-	if (!EVP_DecryptInit_ex2(cctx, EVP_des_ede_cbc(), key, icv, NULL)) {
++	alg = sc_evp_cipher(ctx, "DES-EDE-CBC");
++	if (!EVP_DecryptInit_ex2(cctx, alg, key, icv, NULL)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_ERROR_INTERNAL);
+ 	}
+ 	/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+ 	EVP_CIPHER_CTX_set_padding(cctx, 0);
+ 	if (!EVP_DecryptUpdate(cctx, *out, &tmplen, data, data_len)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_ERROR_INTERNAL);
+ 	}
+ 	*out_len = tmplen;
+ 
+ 	if (!EVP_DecryptFinal_ex(cctx, *out + *out_len, &tmplen)) {
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_ERROR_INTERNAL);
+ 	}
+ 	*out_len += tmplen;
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ #endif
+ 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_SUCCESS);
+ }
+@@ -477,6 +509,7 @@ sm_encrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ #else
+ 	unsigned char icv[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+ 	EVP_CIPHER_CTX *cctx = NULL;
++	EVP_CIPHER *alg = NULL;
+ 	int tmplen;
+ #endif
+ 	unsigned char *data;
+@@ -527,9 +560,11 @@ sm_encrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ 		DES_3cbc_encrypt((sm_des_cblock *)(data + st), (sm_des_cblock *)(*out + st), 8, &ks, &ks2, &icv, DES_ENCRYPT);
+ #else
+ 	cctx = EVP_CIPHER_CTX_new();
+-	if (!EVP_EncryptInit_ex2(cctx, EVP_des_ede_cbc(), key, icv, NULL)) {
++	alg = sc_evp_cipher(ctx, "DES-EDE-CBC");
++	if (!EVP_EncryptInit_ex2(cctx, alg, key, icv, NULL)) {
+ 		free(*out);
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_ERROR_INTERNAL);
+ 	}
+ 	/* Disable padding, otherwise it will fail to decrypt non-padded inputs */
+@@ -537,6 +572,7 @@ sm_encrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ 	if (!EVP_EncryptUpdate(cctx, *out, &tmplen, data, data_len)) {
+ 		free(*out);
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_ERROR_INTERNAL);
+ 	}
+ 	*out_len = tmplen;
+@@ -544,10 +580,12 @@ sm_encrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ 	if (!EVP_EncryptFinal_ex(cctx, *out + *out_len, &tmplen)) {
+ 		free(*out);
+ 		EVP_CIPHER_CTX_free(cctx);
++		sc_evp_cipher_free(alg);
+ 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_SM, SC_ERROR_INTERNAL);
+ 	}
+ 	*out_len += tmplen;
+ 	EVP_CIPHER_CTX_free(cctx);
++	sc_evp_cipher_free(alg);
+ #endif
+ 
+ 	free(data);
+diff --git a/src/sm/sm-common.h b/src/sm/sm-common.h
+index af096865cb..750c38b9a0 100644
+--- a/src/sm/sm-common.h
++++ b/src/sm/sm-common.h
+@@ -30,12 +30,15 @@ extern "C" {
+ 
+ #include "libopensc/sm.h"
+ 
+-unsigned int DES_cbc_cksum_3des(const unsigned char *in, sm_des_cblock *output, long length,
++unsigned int DES_cbc_cksum_3des(struct sc_context *ctx,
++		const unsigned char *in, sm_des_cblock *output, long length,
+ 		unsigned char *key, sm_const_des_cblock *ivec);
+-unsigned int DES_cbc_cksum_3des_emv96(const unsigned char *in, sm_des_cblock *output,
++unsigned int DES_cbc_cksum_3des_emv96(struct sc_context *ctx,
++		const unsigned char *in, sm_des_cblock *output,
+ 		long length, unsigned char *key,
+ 		sm_const_des_cblock *ivec);
+-int sm_encrypt_des_ecb3(unsigned char *key, unsigned char *data, int data_len,
++int sm_encrypt_des_ecb3(struct sc_context *ctx,
++		unsigned char *key, unsigned char *data, int data_len,
+ 		unsigned char **out, int *out_len);
+ int sm_encrypt_des_cbc3(struct sc_context *ctx, unsigned char *key,
+ 		const unsigned char *in, size_t in_len,
+diff --git a/src/smm/sm-card-authentic.c b/src/smm/sm-card-authentic.c
+index b5fc420b15..a58ff5d4c5 100644
+--- a/src/smm/sm-card-authentic.c
++++ b/src/smm/sm-card-authentic.c
+@@ -78,7 +78,7 @@ sm_oberthur_diversify_keyset(struct sc_context *ctx, struct sm_info *sm_info,
+ 
+ 			sc_debug(ctx, SC_LOG_DEBUG_SM, "key_buf:%s", sc_dump_hex(key_buff, 16));
+ 
+-			rv = sm_encrypt_des_ecb3(master_key, key_buff, sizeof(key_buff), &tmp, &tmp_len);
++			rv = sm_encrypt_des_ecb3(ctx, master_key, key_buff, sizeof(key_buff), &tmp, &tmp_len);
+ 			LOG_TEST_RET(ctx, rv, "GP init session: cannot derive key");
+ 
+ 			memcpy(keys[ii], tmp, sizeof(gp_keyset->enc));
+diff --git a/src/smm/sm-cwa14890.c b/src/smm/sm-cwa14890.c
+index c245ae3989..3d58ddad1b 100644
+--- a/src/smm/sm-cwa14890.c
++++ b/src/smm/sm-cwa14890.c
+@@ -71,7 +71,7 @@ sm_cwa_get_mac(struct sc_context *ctx, unsigned char *key, sm_des_cblock *icv,
+ 	sc_debug(ctx, SC_LOG_DEBUG_SM, "sm_cwa_get_mac() data to MAC(%i) %s", in_len, sc_dump_hex(buf, in_len));
+ 	sc_debug(ctx, SC_LOG_DEBUG_SM, "sm_cwa_get_mac() ICV %s", sc_dump_hex((unsigned char *)icv, 8));
+ 
+-	DES_cbc_cksum_3des_emv96(buf, out, in_len, key, icv);
++	DES_cbc_cksum_3des_emv96(ctx, buf, out, in_len, key, icv);
+ 
+ 	free(buf);
+ 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+diff --git a/src/smm/sm-global-platform.c b/src/smm/sm-global-platform.c
+index d91c9a7e4a..a8f8a8bc94 100644
+--- a/src/smm/sm-global-platform.c
++++ b/src/smm/sm-global-platform.c
+@@ -105,7 +105,7 @@ sc_gp_get_session_key(struct sc_context *ctx, struct sm_gp_session *gp_session,
+ 	memcpy(deriv + 8,	gp_session->card_challenge,	4);
+ 	memcpy(deriv + 12,	gp_session->host_challenge + 4,	4);
+ 
+-	if (sm_encrypt_des_ecb3(key, deriv, 16, &out, &out_len))   {
++	if (sm_encrypt_des_ecb3(ctx, key, deriv, 16, &out, &out_len))   {
+ 		if (ctx)
+ 			sc_debug(ctx, SC_LOG_DEBUG_VERBOSE, "SM GP get session key: des_ecb3 encryption error");
+ 		return NULL;
+@@ -123,7 +123,7 @@ sc_gp_get_session_key(struct sc_context *ctx, struct sm_gp_session *gp_session,
+ 
+ 
+ int
+-sm_gp_get_cryptogram(unsigned char *session_key,
++sm_gp_get_cryptogram(struct sc_context *ctx, unsigned char *session_key,
+ 		unsigned char *left, unsigned char *right,
+ 		unsigned char *out, int out_len)
+ {
+@@ -137,7 +137,7 @@ sm_gp_get_cryptogram(unsigned char *session_key,
+ 	memcpy(block + 8, right, 8);
+ 	memcpy(block + 16, "\x80\0\0\0\0\0\0\0",8);
+ 
+-	DES_cbc_cksum_3des(block,&cksum, sizeof(block), session_key, &cksum);
++	DES_cbc_cksum_3des(ctx, block, &cksum, sizeof(block), session_key, &cksum);
+ 
+ 	memcpy(out, cksum, 8);
+ 
+@@ -146,7 +146,7 @@ sm_gp_get_cryptogram(unsigned char *session_key,
+ 
+ 
+ int
+-sm_gp_get_mac(unsigned char *key, sm_des_cblock *icv,
++sm_gp_get_mac(struct sc_context *ctx, unsigned char *key, sm_des_cblock *icv,
+ 		unsigned char *in, int in_len, sm_des_cblock *out)
+ {
+ 	int len;
+@@ -161,7 +161,7 @@ sm_gp_get_mac(unsigned char *key, sm_des_cblock *icv,
+ 	len = in_len + 8;
+ 	len -= (len%8);
+ 
+-	DES_cbc_cksum_3des(block, out, len, key, icv);
++	DES_cbc_cksum_3des(ctx, block, out, len, key, icv);
+ 
+ 	free(block);
+ 	return 0;
+@@ -211,7 +211,7 @@ sm_gp_init_session(struct sc_context *ctx, struct sm_gp_session *gp_session,
+ 	sc_debug(ctx, SC_LOG_DEBUG_SM, "SM GP init session: session KEK: %s", sc_dump_hex(gp_session->session_kek, 16));
+ 
+ 	memset(cksum, 0, sizeof(cksum));
+-	rv = sm_gp_get_cryptogram(gp_session->session_enc, gp_session->host_challenge, gp_session->card_challenge, cksum, sizeof(cksum));
++	rv = sm_gp_get_cryptogram(ctx, gp_session->session_enc, gp_session->host_challenge, gp_session->card_challenge, cksum, sizeof(cksum));
+ 	LOG_TEST_RET(ctx, rv, "SM GP init session: cannot get cryptogram");
+ 
+ 	sc_debug(ctx, SC_LOG_DEBUG_SM, "SM GP init session: cryptogram: %s", sc_dump_hex(cksum, 8));
+@@ -264,7 +264,7 @@ sm_gp_external_authentication(struct sc_context *ctx, struct sm_info *sm_info,
+ 	rv = sm_gp_init_session(ctx, gp_session, init_data + 20, 8);
+ 	LOG_TEST_RET(ctx, rv, "SM GP authentication: init session error");
+ 
+-	rv = sm_gp_get_cryptogram(gp_session->session_enc,
++	rv = sm_gp_get_cryptogram(ctx, gp_session->session_enc,
+ 			gp_session->card_challenge, gp_session->host_challenge,
+ 			host_cryptogram, sizeof(host_cryptogram));
+ 	LOG_TEST_RET(ctx, rv, "SM GP authentication: get host cryptogram error");
+@@ -286,7 +286,7 @@ sm_gp_external_authentication(struct sc_context *ctx, struct sm_info *sm_info,
+ 
+ 	memcpy(raw_apdu + offs, host_cryptogram, 8);
+ 	offs += 8;
+-	rv = sm_gp_get_mac(gp_session->session_mac, &gp_session->mac_icv, raw_apdu, offs, &mac);
++	rv = sm_gp_get_mac(ctx, gp_session->session_mac, &gp_session->mac_icv, raw_apdu, offs, &mac);
+ 	LOG_TEST_RET(ctx, rv, "SM GP authentication: get MAC error");
+ 
+ 	memcpy(new_rapdu->sbuf, host_cryptogram, 8);
+@@ -391,7 +391,7 @@ sm_gp_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info,
+ 
+ 	memcpy(buff + 5, apdu_data, apdu->datalen);
+ 
+-	rv = sm_gp_get_mac(gp_session->session_mac, &gp_session->mac_icv, buff, 5 + apdu->datalen, &mac);
++	rv = sm_gp_get_mac(ctx, gp_session->session_mac, &gp_session->mac_icv, buff, 5 + apdu->datalen, &mac);
+ 	LOG_TEST_GOTO_ERR(ctx, rv, "SM GP securize APDU: get MAC error");
+ 
+ 	if (gp_level == SM_GP_SECURITY_MAC)   {
+diff --git a/src/smm/sm-module.h b/src/smm/sm-module.h
+index c12734a36d..4d11ee994d 100644
+--- a/src/smm/sm-module.h
++++ b/src/smm/sm-module.h
+@@ -34,9 +34,12 @@ extern "C" {
+ #include "sm/sm-common.h"
+ 
+ /* Global Platform definitions */
+-int sm_gp_get_mac(unsigned char *key, sm_des_cblock *icv, unsigned char *in, int in_len,
++int sm_gp_get_mac(struct sc_context *ctx,
++		unsigned char *key, sm_des_cblock *icv,
++		unsigned char *in, int in_len,
+ 		sm_des_cblock *out);
+-int sm_gp_get_cryptogram(unsigned char *session_key, unsigned char *left, unsigned char *right,
++int sm_gp_get_cryptogram(struct sc_context *ctx, unsigned char *session_key,
++		unsigned char *left, unsigned char *right,
+ 		unsigned char *out, int out_len);
+ int sm_gp_external_authentication(struct sc_context *ctx, struct sm_info *sm_info,
+ 		unsigned char *init_data, size_t init_len,
+diff --git a/src/tests/unittests/sm.c b/src/tests/unittests/sm.c
+index ab6e819e40..a21661e6b5 100644
+--- a/src/tests/unittests/sm.c
++++ b/src/tests/unittests/sm.c
+@@ -174,6 +174,7 @@ static void torture_sm_crypt_des_cbc3_force_pad(void **state)
+ 
+ static void torture_sm_encrypt_des_ecb3(void **state)
+ {
++	sc_context_t *ctx = *state;
+ 	/* Test vector from
+ 	 * https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-20.pdf
+ 	 * 5.2.1.1 The Variable Plaintext Known Answer Test -TCBC Mode
+@@ -187,9 +188,7 @@ static void torture_sm_encrypt_des_ecb3(void **state)
+ 	int out_len = 0;
+ 	int rv;
+ 
+-	(void)state;
+-
+-	rv = sm_encrypt_des_ecb3(key, plain, sizeof(plain), &out, &out_len);
++	rv = sm_encrypt_des_ecb3(ctx, key, plain, sizeof(plain), &out, &out_len);
+ 	assert_int_equal(rv, SC_SUCCESS);
+ 	assert_int_equal(out_len, sizeof(ciphertext));
+ 	assert_memory_equal(out, ciphertext, sizeof(ciphertext));
+@@ -197,7 +196,7 @@ static void torture_sm_encrypt_des_ecb3(void **state)
+ 	out = NULL;
+ 	out_len = 0;
+ 
+-	rv = sm_encrypt_des_ecb3(key, ciphertext, sizeof(ciphertext), &out, &out_len);
++	rv = sm_encrypt_des_ecb3(ctx, key, ciphertext, sizeof(ciphertext), &out, &out_len);
+ 	assert_int_equal(rv, SC_SUCCESS);
+ 	assert_memory_equal(out, plain, sizeof(plain));
+ 	free(out);
+@@ -205,6 +204,7 @@ static void torture_sm_encrypt_des_ecb3(void **state)
+ 
+ static void torture_sm_encrypt_des_ecb3_multiblock(void **state)
+ {
++	sc_context_t *ctx = *state;
+ 	/* not a test vector -- generated by openssl 1.1.1 */
+ 	unsigned char key[] = {
+ 		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* KEY1 */
+@@ -219,9 +219,7 @@ static void torture_sm_encrypt_des_ecb3_multiblock(void **state)
+ 	int out_len = 0;
+ 	int rv;
+ 
+-	(void)state;
+-
+-	rv = sm_encrypt_des_ecb3(key, plain, sizeof(plain), &out, &out_len);
++	rv = sm_encrypt_des_ecb3(ctx, key, plain, sizeof(plain), &out, &out_len);
+ 	assert_int_equal(rv, SC_SUCCESS);
+ 	assert_int_equal(out_len, sizeof(ciphertext));
+ 	assert_memory_equal(out, ciphertext, sizeof(ciphertext));
+@@ -229,7 +227,7 @@ static void torture_sm_encrypt_des_ecb3_multiblock(void **state)
+ 	out = NULL;
+ 	out_len = 0;
+ 
+-	rv = sm_encrypt_des_ecb3(key, ciphertext, sizeof(ciphertext), &out, &out_len);
++	rv = sm_encrypt_des_ecb3(ctx, key, ciphertext, sizeof(ciphertext), &out, &out_len);
+ 	assert_int_equal(rv, SC_SUCCESS);
+ 	assert_memory_equal(out, plain, sizeof(plain));
+ 	free(out);
+@@ -237,6 +235,7 @@ static void torture_sm_encrypt_des_ecb3_multiblock(void **state)
+ 
+ static void torture_DES_cbc_cksum_3des(void **state)
+ {
++	sc_context_t *ctx = *state;
+ 	/* not a test vector -- generated by openssl 1.1.1 */
+ 	unsigned char key[] = {
+ 		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* KEY1 */
+@@ -251,19 +250,18 @@ static void torture_DES_cbc_cksum_3des(void **state)
+ 	unsigned char checksum[8];
+ 	unsigned long sum;
+ 
+-	(void)state;
+-
+-	sum = DES_cbc_cksum_3des(plain, &checksum, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des(ctx, plain, &checksum, sizeof(plain), key, &iv);
+ 	assert_int_equal(sum, sum_ref);
+ 	assert_memory_equal(checksum, checksum_ref, sizeof(checksum_ref));
+ 
+ 	/* The checksum argument is not required */
+-	sum = DES_cbc_cksum_3des(plain, NULL, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des(ctx, plain, NULL, sizeof(plain), key, &iv);
+ 	assert_int_equal(sum, sum_ref);
+ }
+ 
+ static void torture_DES_cbc_cksum_3des_multiblock(void **state)
+ {
++	sc_context_t *ctx = *state;
+ 	/* not a test vector -- generated by openssl 1.1.1 */
+ 	unsigned char key[] = {
+ 		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* KEY1 */
+@@ -280,19 +278,18 @@ static void torture_DES_cbc_cksum_3des_multiblock(void **state)
+ 	unsigned char checksum[8];
+ 	unsigned long sum;
+ 
+-	(void)state;
+-
+-	sum = DES_cbc_cksum_3des(plain, &checksum, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des(ctx, plain, &checksum, sizeof(plain), key, &iv);
+ 	assert_memory_equal(checksum, checksum_ref, sizeof(checksum_ref));
+ 	assert_int_equal(sum, sum_ref);
+ 
+ 	/* The checksum argument is not required */
+-	sum = DES_cbc_cksum_3des(plain, NULL, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des(ctx, plain, NULL, sizeof(plain), key, &iv);
+ 	assert_int_equal(sum, sum_ref);
+ }
+ 
+ static void torture_DES_cbc_cksum_3des_emv96(void **state)
+ {
++	sc_context_t *ctx = *state;
+ 	/* not a test vector -- generated by openssl 1.1.1 */
+ 	unsigned char key[] = {
+ 		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* KEY1 */
+@@ -307,19 +304,18 @@ static void torture_DES_cbc_cksum_3des_emv96(void **state)
+ 	unsigned char checksum[8];
+ 	unsigned long sum;
+ 
+-	(void)state;
+-
+-	sum = DES_cbc_cksum_3des_emv96(plain, &checksum, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des_emv96(ctx, plain, &checksum, sizeof(plain), key, &iv);
+ 	assert_int_equal(sum, sum_ref);
+ 	assert_memory_equal(checksum, checksum_ref, sizeof(checksum_ref));
+ 
+ 	/* The checksum argument is not required */
+-	sum = DES_cbc_cksum_3des_emv96(plain, NULL, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des_emv96(ctx, plain, NULL, sizeof(plain), key, &iv);
+ 	assert_int_equal(sum, sum_ref);
+ }
+ 
+ static void torture_DES_cbc_cksum_3des_emv96_multiblock(void **state)
+ {
++	sc_context_t *ctx = *state;
+ 	/* not a test vector -- generated by openssl 1.1.1 */
+ 	unsigned char key[] = {
+ 		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* KEY1 */
+@@ -336,14 +332,12 @@ static void torture_DES_cbc_cksum_3des_emv96_multiblock(void **state)
+ 	unsigned char checksum[8] = {0};
+ 	unsigned long sum;
+ 
+-	(void)state;
+-
+-	sum = DES_cbc_cksum_3des_emv96(plain, &checksum, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des_emv96(ctx, plain, &checksum, sizeof(plain), key, &iv);
+ 	assert_memory_equal(checksum, checksum_ref, sizeof(checksum_ref));
+ 	assert_int_equal(sum, sum_ref);
+ 
+ 	/* The checksum argument is not required */
+-	sum = DES_cbc_cksum_3des_emv96(plain, NULL, sizeof(plain), key, &iv);
++	sum = DES_cbc_cksum_3des_emv96(ctx, plain, NULL, sizeof(plain), key, &iv);
+ 	assert_int_equal(sum, sum_ref);
+ }
+ 
+@@ -361,14 +355,20 @@ int main(void)
+ 		cmocka_unit_test_setup_teardown(torture_sm_crypt_des_cbc3_force_pad,
+ 			setup_sc_context, teardown_sc_context),
+ 		/* sm_encrypt_des_ecb3 */
+-		cmocka_unit_test(torture_sm_encrypt_des_ecb3),
+-		cmocka_unit_test(torture_sm_encrypt_des_ecb3_multiblock),
++		cmocka_unit_test_setup_teardown(torture_sm_encrypt_des_ecb3,
++			setup_sc_context, teardown_sc_context),
++		cmocka_unit_test_setup_teardown(torture_sm_encrypt_des_ecb3_multiblock,
++			setup_sc_context, teardown_sc_context),
+ 		/* DES_cbc_cksum_3des */
+-		cmocka_unit_test(torture_DES_cbc_cksum_3des),
+-		cmocka_unit_test(torture_DES_cbc_cksum_3des_multiblock),
++		cmocka_unit_test_setup_teardown(torture_DES_cbc_cksum_3des,
++			setup_sc_context, teardown_sc_context),
++		cmocka_unit_test_setup_teardown(torture_DES_cbc_cksum_3des_multiblock,
++			setup_sc_context, teardown_sc_context),
+ 		/* DES_cbc_cksum_3des_emv96 */
+-		cmocka_unit_test(torture_DES_cbc_cksum_3des_emv96),
+-		cmocka_unit_test(torture_DES_cbc_cksum_3des_emv96_multiblock),
++		cmocka_unit_test_setup_teardown(torture_DES_cbc_cksum_3des_emv96,
++			setup_sc_context, teardown_sc_context),
++		cmocka_unit_test_setup_teardown(torture_DES_cbc_cksum_3des_emv96_multiblock,
++			setup_sc_context, teardown_sc_context),
+ 	};
+ 
+ 	rc = cmocka_run_group_tests(tests, NULL, NULL);
+
+From 842910535ecd7268ff915546ac45e395828d1b76 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Thu, 16 Feb 2023 09:05:56 -0500
+Subject: [PATCH 19/20] Protect from nested initializations
+
+If a library used by the module itself tries, somehow to also
+initializae the module, return a hard error. Nested Initializations are
+not permitted.
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/pkcs11/pkcs11-global.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/pkcs11/pkcs11-global.c b/src/pkcs11/pkcs11-global.c
+index 48ef7823f0..e47f644b0a 100644
+--- a/src/pkcs11/pkcs11-global.c
++++ b/src/pkcs11/pkcs11-global.c
+@@ -59,6 +59,7 @@ pid_t initialized_pid = (pid_t)-1;
+ static int in_finalize = 0;
+ extern CK_FUNCTION_LIST pkcs11_function_list;
+ extern CK_FUNCTION_LIST_3_0 pkcs11_function_list_3_0;
++int nesting = 0;
+ 
+ #ifdef PKCS11_THREAD_LOCKING
+ 
+@@ -306,12 +307,21 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
+ 	in_finalize = 0;
+ #endif
+ 
++	/* protect from nesting */
++	nesting++;
++	if (nesting > 1) {
++		sc_log(context, "C_Initialize(): Nested init detected");
++		nesting--;
++		return CKR_GENERAL_ERROR;
++	}
++
+ 	/* protect from multiple threads tryng to setup locking */
+ 	C_INITIALIZE_M_LOCK
+ 
+ 	if (context != NULL) {
+ 		sc_log(context, "C_Initialize(): Cryptoki already initialized\n");
+ 		C_INITIALIZE_M_UNLOCK
++		nesting--;
+ 		return CKR_CRYPTOKI_ALREADY_INITIALIZED;
+ 	}
+ 
+@@ -366,6 +376,7 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
+ 	/* protect from multiple threads tryng to setup locking */
+ 	C_INITIALIZE_M_UNLOCK
+ 
++	nesting--;
+ 	return rv;
+ }
+ 
+
+From 31809ef5eb12b37db23fed6a295484fac86cd178 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Thu, 16 Feb 2023 17:13:19 -0500
+Subject: [PATCH 20/20] Add thread locking protection for nesting check
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ src/pkcs11/pkcs11-global.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/pkcs11/pkcs11-global.c b/src/pkcs11/pkcs11-global.c
+index e47f644b0a..cbc7445bb9 100644
+--- a/src/pkcs11/pkcs11-global.c
++++ b/src/pkcs11/pkcs11-global.c
+@@ -308,20 +308,24 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
+ #endif
+ 
+ 	/* protect from nesting */
++	C_INITIALIZE_M_LOCK
+ 	nesting++;
+ 	if (nesting > 1) {
+ 		sc_log(context, "C_Initialize(): Nested init detected");
+ 		nesting--;
++		C_INITIALIZE_M_UNLOCK
+ 		return CKR_GENERAL_ERROR;
+ 	}
++	C_INITIALIZE_M_UNLOCK
++	/* protect from nesting */
+ 
+ 	/* protect from multiple threads tryng to setup locking */
+ 	C_INITIALIZE_M_LOCK
+ 
+ 	if (context != NULL) {
+ 		sc_log(context, "C_Initialize(): Cryptoki already initialized\n");
+-		C_INITIALIZE_M_UNLOCK
+ 		nesting--;
++		C_INITIALIZE_M_UNLOCK
+ 		return CKR_CRYPTOKI_ALREADY_INITIALIZED;
+ 	}
+ 
+@@ -374,9 +378,9 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
+ 	}
+ 
+ 	/* protect from multiple threads tryng to setup locking */
++	nesting--;
+ 	C_INITIALIZE_M_UNLOCK
+ 
+-	nesting--;
+ 	return rv;
+ }
+ 
+

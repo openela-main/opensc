@@ -2,7 +2,7 @@
 %define nssdb %{_sysconfdir}/pki/nssdb
 
 Name:           opensc
-Version:        0.22.0
+Version:        0.23.0
 Release:        2%{?dist}
 Summary:        Smart card library and applications
 
@@ -11,16 +11,20 @@ URL:            https://github.com/OpenSC/OpenSC/wiki
 Source0:        https://github.com/OpenSC/OpenSC/releases/download/%{version}/%{name}-%{version}.tar.gz
 Source1:        opensc.module
 Patch1:         opensc-0.19.0-pinpad.patch
-# https://github.com/OpenSC/OpenSC/pull/2241/
-Patch5:         %{name}-gcc11.patch
-# https://github.com/OpenSC/OpenSC/pull/2343
-Patch7:         %{name}-32b-arch.patch
 # File caching by default (#2000626)
-Patch8:         %{name}-%{version}-file-cache.patch
-# https://github.com/OpenSC/OpenSC/pull/2414 (#2007029)
-Patch9:         %{name}-%{version}-detect-empty.patch
+Patch8:         %{name}-0.22.0-file-cache.patch
+# https://github.com/OpenSC/OpenSC/pull/2656
+Patch9:         %{name}-0.23.0-pkcs11-tool-import.patch
+# https://github.com/OpenSC/OpenSC/pull/2712
+Patch10:         %{name}-0.23.0-openssl-ctx.patch
+# https://github.com/OpenSC/OpenSC/pull/2753
+# https://github.com/OpenSC/OpenSC/commit/e8fba322a2f4d06ec5c74fe80f9e2b0e9fdefec6
+# https://github.com/OpenSC/OpenSC/commit/891f10e49de1a5ee038b1cb2fb59dce40429e6c2
+Patch11:         %{name}-0.23.0-openpgp.patch
+# https://github.com/OpenSC/OpenSC/commit/81944d1529202bd28359bede57c0a15deb65ba8a
+Patch12:        %{name}-0.23.0-cardos-pkcs15init.patch
 
-BuildRequires: make
+BuildRequires:  make
 BuildRequires:  pcsc-lite-devel
 BuildRequires:  readline-devel
 BuildRequires:  openssl-devel
@@ -31,6 +35,7 @@ BuildRequires:  bash-completion
 BuildRequires:  zlib-devel
 # For tests
 BuildRequires:  libcmocka-devel
+BuildRequires:  vim-common
 %if ! 0%{?rhel}
 BuildRequires:  softhsm
 %endif
@@ -56,10 +61,11 @@ every software/card that does so, too.
 %prep
 %setup -q
 %patch1 -p1 -b .pinpad
-%patch5 -p1 -b .gcc11
-%patch7 -p1 -b .32b
 %patch8 -p1 -b .file-cache
-%patch9 -p1 -b .detect-empty
+%patch9 -p1 -b .pkcs11-tool-import
+%patch10 -p1 -b .ossl3context
+%patch11 -p1 -b .openpgp
+%patch12 -p1 -b .cardos-pkcs15init
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -75,20 +81,18 @@ sed -i -e 's/opensc.conf/opensc-%{_arch}.conf/g' src/libopensc/Makefile.in
 sed -i -e 's|"/lib /usr/lib\b|"/%{_lib} %{_libdir}|' configure # lib64 rpaths
 %set_build_flags
 CFLAGS="$CFLAGS -Wstrict-aliasing=2 -Wno-deprecated-declarations"
-%configure  --disable-static \
+%configure --disable-static \
   --disable-autostart-items \
   --disable-notify \
   --disable-assert \
   --enable-pcsc \
   --enable-cmocka \
-  --enable-sm \
-  --with-pcsc-provider=libpcsclite.so.1
+  --enable-sm
 %make_build
 
 
 %check
 make check
-
 
 %install
 %make_install
@@ -119,9 +123,6 @@ rm -f $RPM_BUILD_ROOT%{_libdir}/libopensc.so
 # remove the .pc file so we do not confuse users #1673139
 rm -f $RPM_BUILD_ROOT%{_libdir}/pkgconfig/*.pc
 rm -f $RPM_BUILD_ROOT%{_libdir}/libsmm-local.so
-%if 0%{?rhel} && 0%{?rhel} < 7
-rm -rf %{buildroot}%{_datadir}/bash-completion/
-%endif
 
 # the npa-tool builds to nothing since we do not have OpenPACE library
 rm -rf %{buildroot}%{_bindir}/npa-tool
@@ -132,7 +133,6 @@ rm -rf %{buildroot}%{_bindir}/pkcs11-register
 rm -rf %{buildroot}%{_mandir}/man1/pkcs11-register.1*
 
 # Remove the notification files
-rm %{buildroot}%{_bindir}/opensc-notify
 rm %{buildroot}%{_datadir}/applications/org.opensc.notify.desktop
 rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
@@ -140,9 +140,7 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 %files
 %doc COPYING NEWS README*
 
-%if ! 0%{?rhel} || 0%{?rhel} >= 7
 %{_datadir}/bash-completion/*
-%endif
 
 %ifarch %{ix86}
 %{_mandir}/man5/opensc-%{_arch}.conf.5*
@@ -209,6 +207,14 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
+* Thu May 25 2023 Jakub Jelen <jjelen@redhat.com> - 0.23.0-2
+- Fix regression in handling OpenPGP cards
+- Fix CVE-2023-2977: buffer overrun in pkcs15init for cardos
+
+* Wed Mar 08 2023 Jakub Jelen <jjelen@redhat.com> - 0.23.0-1
+- Rebase to latest 0.23.0 release (#2100409)
+- Use separate OpenSSL context to work better from inside of OpenSSL providers
+
 * Fri Oct 08 2021 Jakub Jelen <jjelen@redhat.com> - 0.22.0-2
 - Unbreak detection of unentrolled smart cards (#2007029)
 - Enable file caching by default except for pkcs15-init (#2000626)
