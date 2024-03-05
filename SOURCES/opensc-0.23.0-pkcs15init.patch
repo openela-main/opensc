@@ -1,0 +1,1016 @@
+From 245efe608d083fd4e4ec96793fdefd218e26fde7 Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Thu, 17 Aug 2023 13:54:42 +0200
+Subject: [PATCH] pkcs15: Avoid buffer overflow when getting last update
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=60769
+---
+ src/libopensc/pkcs15.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/src/libopensc/pkcs15.c b/src/libopensc/pkcs15.c
+index eb7fc6afc..4215b733a 100644
+--- a/src/libopensc/pkcs15.c
++++ b/src/libopensc/pkcs15.c
+@@ -532,7 +532,7 @@ sc_pkcs15_get_lastupdate(struct sc_pkcs15_card *p15card)
+ 	struct sc_context *ctx  = p15card->card->ctx;
+ 	struct sc_file *file = NULL;
+ 	struct sc_asn1_entry asn1_last_update[C_ASN1_LAST_UPDATE_SIZE];
+-	unsigned char *content, last_update[32];
++	unsigned char *content, last_update[32] = {0};
+ 	size_t lupdate_len = sizeof(last_update) - 1;
+ 	int r, content_len;
+ 	size_t size;
+@@ -569,9 +569,11 @@ sc_pkcs15_get_lastupdate(struct sc_pkcs15_card *p15card)
+ 	if (r < 0)
+ 		return NULL;
+ 
+-	p15card->tokeninfo->last_update.gtime = strdup((char *)last_update);
+-	if (!p15card->tokeninfo->last_update.gtime)
+-		return NULL;
++	if (asn1_last_update[0].flags & SC_ASN1_PRESENT) {
++		p15card->tokeninfo->last_update.gtime = strdup((char *)last_update);
++		if (!p15card->tokeninfo->last_update.gtime)
++			return NULL;
++	}
+ done:
+ 	sc_log(ctx, "lastUpdate.gtime '%s'", p15card->tokeninfo->last_update.gtime);
+ 	return p15card->tokeninfo->last_update.gtime;
+2.41.0
+
+From 440ca666eff10cc7011901252d20f3fc4ea23651 Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Thu, 17 Aug 2023 13:41:36 +0200
+Subject: [PATCH] setcos: Avoid buffer underflow
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=60672
+---
+ src/pkcs15init/pkcs15-setcos.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/pkcs15init/pkcs15-setcos.c b/src/pkcs15init/pkcs15-setcos.c
+index 1b56afe6d..1907b47f9 100644
+--- a/src/pkcs15init/pkcs15-setcos.c
++++ b/src/pkcs15init/pkcs15-setcos.c
+@@ -349,6 +349,10 @@ setcos_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
+ 
+ 	/* Replace the path of instantiated key template by the path from the object data. */
+         memcpy(&file->path, &key_info->path, sizeof(file->path));
++	if (file->path.len < 2) {
++		sc_file_free(file);
++		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Invalid path");
++	}
+         file->id = file->path.value[file->path.len - 2] * 0x100
+ 		+ file->path.value[file->path.len - 1];
+ 
+-- 
+2.41.0
+
+From 41d61da8481582e12710b5858f8b635e0a71ab5e Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Wed, 20 Sep 2023 10:13:57 +0200
+Subject: [PATCH] oberthur: Avoid buffer overflow
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=60650
+---
+ src/pkcs15init/pkcs15-oberthur.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/pkcs15init/pkcs15-oberthur.c b/src/pkcs15init/pkcs15-oberthur.c
+index ad2cabd53..c441ab1e7 100644
+--- a/src/pkcs15init/pkcs15-oberthur.c
++++ b/src/pkcs15init/pkcs15-oberthur.c
+@@ -715,6 +715,9 @@ cosm_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
+ 	if (object->type != SC_PKCS15_TYPE_PRKEY_RSA)
+ 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Create key failed: RSA only supported");
+ 
++	if (key_info->path.len < 2)
++		LOG_TEST_RET(ctx, SC_ERROR_OBJECT_NOT_VALID, "The path needs to be at least to bytes long");
++
+ 	sc_log(ctx,  "create private key ID:%s",  sc_pkcs15_print_id(&key_info->id));
+ 	/* Here, the path of private key file should be defined.
+ 	 * Nevertheless, we need to instantiate private key to get the ACLs. */
+-- 
+2.41.0
+
+
+From 88880db0307a07e33cf2e1592bb029e9c170dfea Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Wed, 21 Jun 2023 15:48:27 +0200
+Subject: [PATCH] pkcs15-pubkey: free DER value when parsing public key fails
+
+The der value might be allocated in asn1_decode_entry()
+but it is not released when errror occurs.
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=59615
+---
+ src/libopensc/pkcs15-pubkey.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/libopensc/pkcs15-pubkey.c b/src/libopensc/pkcs15-pubkey.c
+index 4a0ddffbe..7107c47cb 100644
+--- a/src/libopensc/pkcs15-pubkey.c
++++ b/src/libopensc/pkcs15-pubkey.c
+@@ -351,6 +351,8 @@ int sc_pkcs15_decode_pukdf_entry(struct sc_pkcs15_card *p15card,
+ err:
+ 	if (r < 0) {
+ 		sc_pkcs15_free_pubkey_info(info);
++		if (der->len)
++			free(der->value);
+ 	}
+ 
+ 	LOG_FUNC_RETURN(ctx, r);
+-- 
+2.41.0
+
+From 638a5007a5d240d6fa901aa822cfeef94fe36e85 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Thu, 10 Aug 2023 12:20:33 +0200
+Subject: [PATCH] pkcs15-pubkey.c: Avoid double-free
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=60616
+---
+ src/libopensc/pkcs15-pubkey.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/libopensc/pkcs15-pubkey.c b/src/libopensc/pkcs15-pubkey.c
+index 7107c47cb..49b514968 100644
+--- a/src/libopensc/pkcs15-pubkey.c
++++ b/src/libopensc/pkcs15-pubkey.c
+@@ -351,8 +351,12 @@ int sc_pkcs15_decode_pukdf_entry(struct sc_pkcs15_card *p15card,
+ err:
+ 	if (r < 0) {
+ 		sc_pkcs15_free_pubkey_info(info);
+-		if (der->len)
++		if (der->len) {
+ 			free(der->value);
++			/* der points to obj->content */
++			obj->content.value = NULL;
++			obj->content.len = 0;
++		}
+ 	}
+ 
+ 	LOG_FUNC_RETURN(ctx, r);
+-- 
+2.41.0
+From c449a181a6988cc1e8dc8764d23574e48cdc3fa6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Mon, 19 Jun 2023 16:14:51 +0200
+Subject: [PATCH] pkcs15-cflex: check path length to prevent underflow
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=58932
+---
+ src/pkcs15init/pkcs15-cflex.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/pkcs15init/pkcs15-cflex.c b/src/pkcs15init/pkcs15-cflex.c
+index d06568073..ce1d48e62 100644
+--- a/src/pkcs15init/pkcs15-cflex.c
++++ b/src/pkcs15init/pkcs15-cflex.c
+@@ -56,6 +56,9 @@ cflex_delete_file(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *d
+         int             r = 0;
+         /* Select the parent DF */
+         path = df->path;
++		if (path.len < 2) {
++			return SC_ERROR_INVALID_ARGUMENTS;
++		}
+         path.len -= 2;
+         r = sc_select_file(p15card->card, &path, &parent);
+         if (r < 0)
+-- 
+2.41.0
+
+From 5631e9843c832a99769def85b7b9b68b4e3e3959 Mon Sep 17 00:00:00 2001
+From: Veronika Hanulikova <xhanulik@fi.muni.cz>
+Date: Fri, 3 Mar 2023 16:07:38 +0100
+Subject: [PATCH] Check length of string before making copy
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=55851
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=55998
+---
+ src/pkcs15init/profile.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/pkcs15init/profile.c b/src/pkcs15init/profile.c
+index 2b793b028..3bad1e853 100644
+--- a/src/pkcs15init/profile.c
++++ b/src/pkcs15init/profile.c
+@@ -1575,7 +1575,10 @@ do_acl(struct state *cur, int argc, char **argv)
+ 	while (argc--) {
+ 		unsigned int	op, method, id;
+ 
++		if (strlen(*argv) >= sizeof(oper))
++			goto bad;
+ 		strlcpy(oper, *argv++, sizeof(oper));
++
+ 		if ((what = strchr(oper, '=')) == NULL)
+ 			goto bad;
+ 		*what++ = '\0';
+@@ -2288,6 +2291,9 @@ get_authid(struct state *cur, const char *value,
+ 		return get_uint(cur, value, type);
+ 	}
+ 
++	if (strlen(value) >= sizeof(temp))
++		return 1;
++
+ 	n = strcspn(value, "0123456789x");
+ 	strlcpy(temp, value, (sizeof(temp) > n) ? n + 1 : sizeof(temp));
+ 
+-- 
+2.41.0
+
+From e7f81d86dcdc751f4737f4b29a99bfc54d29c5c9 Mon Sep 17 00:00:00 2001
+From: Frank Morgner <frankmorgner@gmail.com>
+Date: Thu, 8 Dec 2022 00:45:31 +0100
+Subject: [PATCH] muscle: prevent out of bounds write
+
+fixes https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=53631
+---
+ src/libopensc/muscle.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/libopensc/muscle.c b/src/libopensc/muscle.c
+index 7af279a0a..61a4ec24d 100644
+--- a/src/libopensc/muscle.c
++++ b/src/libopensc/muscle.c
+@@ -127,7 +127,7 @@ int msc_zero_object(sc_card_t *card, msc_id objectId, size_t dataLength)
+ {
+ 	u8 zeroBuffer[MSC_MAX_APDU];
+ 	size_t i;
+-	size_t max_write_unit = MSC_MAX_SEND - 9; /* - 9 for object ID+length */
++	size_t max_write_unit = MIN(MSC_MAX_APDU, MSC_MAX_SEND - 9); /* - 9 for object ID+length */
+ 
+ 	memset(zeroBuffer, 0, max_write_unit);
+ 	for(i = 0; i < dataLength; i += max_write_unit) {
+-- 
+2.41.0
+
+From df5a176bfdf8c52ba89c7fef1f82f6f3b9312bc1 Mon Sep 17 00:00:00 2001
+From: Veronika Hanulikova <xhanulik@fi.muni.cz>
+Date: Fri, 10 Feb 2023 11:47:34 +0100
+Subject: [PATCH] Check array bounds
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=54312
+---
+ src/libopensc/muscle.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/libopensc/muscle.c b/src/libopensc/muscle.c
+index 61a4ec24d..9d01e0c11 100644
+--- a/src/libopensc/muscle.c
++++ b/src/libopensc/muscle.c
+@@ -181,6 +181,9 @@ int msc_partial_update_object(sc_card_t *card, msc_id objectId, int offset, cons
+ 	sc_apdu_t apdu;
+ 	int r;
+ 
++	if (dataLength + 9 > MSC_MAX_APDU)
++		return SC_ERROR_INVALID_ARGUMENTS;
++
+ 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x54, 0x00, 0x00);
+ 	apdu.lc = dataLength + 9;
+ 	if (card->ctx->debug >= 2)
+-- 
+2.41.0
+
+From 578aed8391ef117ca64a9e0cba8e5c264368a0ec Mon Sep 17 00:00:00 2001
+From: Frank Morgner <frankmorgner@gmail.com>
+Date: Thu, 8 Dec 2022 00:27:18 +0100
+Subject: [PATCH] sc_pkcs15init_rmdir: prevent out of bounds write
+
+fixes https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=53927
+---
+ src/pkcs15init/pkcs15-lib.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/pkcs15init/pkcs15-lib.c b/src/pkcs15init/pkcs15-lib.c
+index 91cee3731..3df03c6e1 100644
+--- a/src/pkcs15init/pkcs15-lib.c
++++ b/src/pkcs15init/pkcs15-lib.c
+@@ -685,6 +685,8 @@ sc_pkcs15init_rmdir(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
+ 
+ 		path = df->path;
+ 		path.len += 2;
++		if (path.len > SC_MAX_PATH_SIZE)
++			return SC_ERROR_INTERNAL;
+ 
+ 		nfids = r / 2;
+ 		while (r >= 0 && nfids--) {
+-- 
+2.41.0
+
+From 4013a807492568bf9907cfb3df41f130ac83c7b9 Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Wed, 15 Nov 2023 10:53:46 +0100
+Subject: [PATCH] setcos: Avoid writing behind the path buffer end
+
+The path->value buffer is fixed to 16 bytes so it is not always possible
+to append 2 more bytes. Doing so overruns the buffer, writing into the
+ACL block, crashing during the cleanup.
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=64181
+---
+ src/pkcs15init/pkcs15-setcos.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/pkcs15init/pkcs15-setcos.c b/src/pkcs15init/pkcs15-setcos.c
+index 70a28048b..1eeeda064 100644
+--- a/src/pkcs15init/pkcs15-setcos.c
++++ b/src/pkcs15init/pkcs15-setcos.c
+@@ -287,6 +287,10 @@ setcos_new_file(sc_profile_t *profile, sc_card_t *card,
+ 	file->id += num;
+ 	p = &file->path;
+ 	*p = profile->df_info->file->path;
++	if (p->len + 2 > SC_MAX_PATH_SIZE) {
++		sc_file_free(file);
++		return SC_ERROR_INVALID_DATA;
++	}
+ 	p->value[p->len++] = (u8) (file->id / 256);
+ 	p->value[p->len++] = (u8) (file->id % 256);
+ 
+-- 
+2.42.0
+
+From 609164045facaeae193feb48d9c2fc5cc4321e8a Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Thu, 16 Nov 2023 09:55:47 +0100
+Subject: [PATCH] epass2003: Avoid heap buffer overflow
+
+Removes also needless malloc & memcpy instead of returning the first
+allocated buffer.
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=64215
+---
+ src/libopensc/card-epass2003.c    | 30 +++++++++++++++---------------
+ src/libopensc/cardctl.h           |  1 +
+ src/pkcs15init/pkcs15-epass2003.c |  7 ++++---
+ 3 files changed, 20 insertions(+), 18 deletions(-)
+
+diff --git a/src/libopensc/card-epass2003.c b/src/libopensc/card-epass2003.c
+index ed2ec649b..76ba339e6 100644
+--- a/src/libopensc/card-epass2003.c
++++ b/src/libopensc/card-epass2003.c
+@@ -3082,11 +3082,21 @@ epass2003_gen_key(struct sc_card *card, sc_epass2003_gen_key_data * data)
+ 	if (len < apdu.resplen)
+ 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
+ 
+-	if(256 == len)
++	if(256 == len) /* ECC 256 bit */
+ 	{
+-		int xCoordinateLen = rbuf[1];
+-		int yCoordinateLen = rbuf[2+xCoordinateLen+1];
+-		unsigned char * tmp =(u8 *)malloc(xCoordinateLen + yCoordinateLen);
++		size_t xCoordinateLen = rbuf[1];
++		size_t yCoordinateLen;
++		unsigned char *tmp;
++
++		if (2 + xCoordinateLen + 1 >= apdu.resplen) {
++			LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_DATA);
++		}
++		yCoordinateLen = rbuf[2 + xCoordinateLen + 1];
++		if (2 + xCoordinateLen + 2 + yCoordinateLen >= apdu.resplen) {
++			LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_DATA);
++		}
++		data->modulus_len = xCoordinateLen + yCoordinateLen;
++		tmp = (u8 *)malloc(data->modulus_len);
+ 		if(!tmp)
+ 		{
+ 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
+@@ -3109,17 +3119,7 @@ epass2003_gen_key(struct sc_card *card, sc_epass2003_gen_key_data * data)
+ 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_OBJECT_NOT_VALID);
+ 		}
+ 
+-		data->modulus = (u8 *) malloc(xCoordinateLen + yCoordinateLen);
+-		if (!data->modulus)
+-		{
+-			free(tmp);
+-			LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
+-		}
+-		else
+-		{
+-			memcpy(data->modulus, tmp, xCoordinateLen+yCoordinateLen);
+-			free(tmp);
+-		}
++		data->modulus = tmp;
+ 	}
+ 	else
+ 	{
+diff --git a/src/libopensc/cardctl.h b/src/libopensc/cardctl.h
+index 9ce90ec15..acefbee5c 100644
+--- a/src/libopensc/cardctl.h
++++ b/src/libopensc/cardctl.h
+@@ -833,6 +833,7 @@ typedef struct sc_epass2003_gen_key_data_st {
+ 	 int pukey_id;
+ 	 size_t key_length;
+ 	 u8 *modulus;
++	 int modulus_len;
+ } sc_epass2003_gen_key_data;
+ 
+ 
+diff --git a/src/pkcs15init/pkcs15-epass2003.c b/src/pkcs15init/pkcs15-epass2003.c
+index b9b9a1156..92bf46895 100644
+--- a/src/pkcs15init/pkcs15-epass2003.c
++++ b/src/pkcs15init/pkcs15-epass2003.c
+@@ -638,10 +638,11 @@ static int epass2003_pkcs15_generate_key(struct sc_profile *profile,
+ 	gendat.pukey_id = pukf->id;
+ 	gendat.key_length = keybits;
+ 	gendat.modulus = NULL;
++	gendat.modulus_len = 0;
+ 	r = sc_card_ctl(card, SC_CARDCTL_ENTERSAFE_GENERATE_KEY, &gendat);
+ 	SC_TEST_GOTO_ERR(card->ctx, SC_LOG_DEBUG_VERBOSE, r,
+ 		    "generate RSA key pair failed");
+-	
++
+ 	if (!gendat.modulus) {
+ 		r = SC_ERROR_OUT_OF_MEMORY;
+ 		goto err;
+@@ -679,8 +680,8 @@ static int epass2003_pkcs15_generate_key(struct sc_profile *profile,
+ 		}
+ 
+ 		pubkey->u.ec.ecpointQ.value[0] = 0x04;
+-		memcpy(&pubkey->u.ec.ecpointQ.value[1], gendat.modulus, 64);
+-		pubkey->u.ec.ecpointQ.len = 65;
++		memcpy(&pubkey->u.ec.ecpointQ.value[1], gendat.modulus, gendat.modulus_len);
++		pubkey->u.ec.ecpointQ.len = gendat.modulus_len;
+ 
+ 		free(pubkey->u.ec.params.named_curve);
+ 		pubkey->u.ec.params.named_curve = NULL; 
+-- 
+2.42.0
+
+From 8fc2c20c3f895569eeb58328bb882aec07325d3b Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Tue, 7 Nov 2023 17:48:27 +0100
+Subject: [PATCH] iasecc: Avoid another buffer overflow
+
+thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=63949
+---
+ src/libopensc/iasecc-sdo.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/libopensc/iasecc-sdo.c b/src/libopensc/iasecc-sdo.c
+index a41c3c2d3..86032f5a8 100644
+--- a/src/libopensc/iasecc-sdo.c
++++ b/src/libopensc/iasecc-sdo.c
+@@ -44,7 +44,8 @@ iasecc_parse_acls(struct sc_card *card, struct iasecc_sdo_docp *docp, int flags)
+ {
+ 	struct sc_context *ctx = card->ctx;
+ 	struct iasecc_extended_tlv *acls = &docp->acls_contact;
+-	int ii, offs;
++	int ii;
++	size_t offs;
+ 	unsigned char mask = 0x40;
+ 
+ 	if (flags)
+@@ -56,8 +57,12 @@ iasecc_parse_acls(struct sc_card *card, struct iasecc_sdo_docp *docp, int flags)
+ 	docp->amb = *(acls->value + 0);
+ 	memset(docp->scbs, 0xFF, sizeof(docp->scbs));
+ 	for (ii=0, offs = 1; ii<7; ii++, mask >>= 1)
+-		if (mask & docp->amb)
++		if (mask & docp->amb) {
++			if (offs >= acls->size) {
++				LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
++			}
+ 			docp->scbs[ii] = *(acls->value + offs++);
++		}
+ 
+ 	sc_log(ctx, "iasecc_parse_docp() SCBs %02X:%02X:%02X:%02X:%02X:%02X:%02X",
+ 			docp->scbs[0],docp->scbs[1],docp->scbs[2],docp->scbs[3],
+-- 
+2.42.0
+
+From 83b9129bd3cfc6ac57d5554e015c3df85f5076dc Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Wed, 11 Oct 2023 08:57:45 +0200
+Subject: [PATCH] iassecc: Verify buffer lengths before use
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=63163
+---
+ src/libopensc/iasecc-sdo.c | 55 +++++++++++++++++++++-----------------
+ 1 file changed, 31 insertions(+), 24 deletions(-)
+
+diff --git a/src/libopensc/iasecc-sdo.c b/src/libopensc/iasecc-sdo.c
+index 3eeb03b91..a6e6c2677 100644
+--- a/src/libopensc/iasecc-sdo.c
++++ b/src/libopensc/iasecc-sdo.c
+@@ -36,7 +36,7 @@
+ #include "iasecc.h"
+ #include "iasecc-sdo.h"
+ 
+-static int iasecc_parse_size(unsigned char *data, size_t *out);
++static int iasecc_parse_size(unsigned char *data, size_t data_len, size_t *out);
+ 
+ 
+ static int
+@@ -330,7 +330,7 @@ iasecc_se_parse(struct sc_card *card, unsigned char *data, size_t data_len, stru
+ 	LOG_FUNC_CALLED(ctx);
+ 
+ 	if (*data == IASECC_SDO_TEMPLATE_TAG)   {
+-		size_size = iasecc_parse_size(data + 1, &size);
++		size_size = iasecc_parse_size(data + 1, data_len - 1, &size);
+ 		LOG_TEST_RET(ctx, size_size, "parse error: invalid size data of IASECC_SDO_TEMPLATE");
+ 
+ 		data += size_size + 1;
+@@ -345,7 +345,7 @@ iasecc_se_parse(struct sc_card *card, unsigned char *data, size_t data_len, stru
+ 		if ((*(data + 1) & 0x7F) != IASECC_SDO_CLASS_SE)
+ 			 LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
+ 
+-		size_size = iasecc_parse_size(data + 3, &size);
++		size_size = iasecc_parse_size(data + 3, data_len - 3, &size);
+ 		LOG_TEST_RET(ctx, size_size, "parse error: invalid SDO SE data size");
+ 
+ 		if (data_len != size + size_size + 3)
+@@ -365,7 +365,7 @@ iasecc_se_parse(struct sc_card *card, unsigned char *data, size_t data_len, stru
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
+ 	}
+ 
+-	size_size = iasecc_parse_size(data + 1, &size);
++	size_size = iasecc_parse_size(data + 1, data_len - 1, &size);
+ 	LOG_TEST_RET(ctx, size_size, "parse error: invalid size data");
+ 
+ 	if (data_len != size + size_size + 1)
+@@ -387,17 +387,17 @@ iasecc_se_parse(struct sc_card *card, unsigned char *data, size_t data_len, stru
+ 
+ 
+ static int
+-iasecc_parse_size(unsigned char *data, size_t *out)
++iasecc_parse_size(unsigned char *data, size_t data_len, size_t *out)
+ {
+-	if (*data < 0x80)   {
++	if (*data < 0x80 && data_len > 0) {
+ 		*out = *data;
+ 		return 1;
+ 	}
+-	else if (*data == 0x81)   {
++	else if (*data == 0x81 && data_len > 1) {
+ 		*out = *(data + 1);
+ 		return 2;
+ 	}
+-	else if (*data == 0x82)   {
++	else if (*data == 0x82 && data_len > 2) {
+ 		*out = *(data + 1) * 0x100 + *(data + 2);
+ 		return 3;
+ 	}
+@@ -407,14 +407,18 @@ iasecc_parse_size(unsigned char *data, size_t *out)
+ 
+ 
+ static int
+-iasecc_parse_get_tlv(struct sc_card *card, unsigned char *data, struct iasecc_extended_tlv *tlv)
++iasecc_parse_get_tlv(struct sc_card *card, unsigned char *data, size_t data_len, struct iasecc_extended_tlv *tlv)
+ {
+ 	struct sc_context *ctx = card->ctx;
+ 	size_t size_len, tag_len;
+ 
+ 	memset(tlv, 0, sizeof(*tlv));
+ 	sc_log(ctx, "iasecc_parse_get_tlv() called for tag 0x%X", *data);
++	if (data_len < 1)
++		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
+ 	if ((*data == 0x7F) || (*data == 0x5F))   {
++		if (data_len < 2)
++			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
+ 		tlv->tag = *data * 0x100 + *(data + 1);
+ 		tag_len = 2;
+ 	}
+@@ -424,8 +428,11 @@ iasecc_parse_get_tlv(struct sc_card *card, unsigned char *data, struct iasecc_ex
+ 	}
+ 
+ 	sc_log(ctx, "iasecc_parse_get_tlv() tlv->tag 0x%X", tlv->tag);
+-	size_len = iasecc_parse_size(data + tag_len, &tlv->size);
++	size_len = iasecc_parse_size(data + tag_len, data_len - tag_len, &tlv->size);
+ 	LOG_TEST_RET(ctx, size_len, "parse error: invalid size data");
++	if (tag_len + size_len + tlv->size > data_len) {
++		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
++	}
+ 
+ 	tlv->value = calloc(1, tlv->size);
+ 	if (!tlv->value)
+@@ -452,7 +459,7 @@ iasecc_parse_chv(struct sc_card *card, unsigned char *data, size_t data_len, str
+ 	while(offs < data_len)   {
+ 		struct iasecc_extended_tlv tlv;
+ 
+-		rv = iasecc_parse_get_tlv(card, data + offs, &tlv);
++		rv = iasecc_parse_get_tlv(card, data + offs, data_len - offs, &tlv);
+ 		LOG_TEST_RET(ctx, rv, "iasecc_parse_chv() get and parse TLV error");
+ 
+ 		sc_log(ctx,
+@@ -486,7 +493,7 @@ iasecc_parse_prvkey(struct sc_card *card, unsigned char *data, size_t data_len,
+ 	while(offs < data_len)   {
+ 		struct iasecc_extended_tlv tlv;
+ 
+-		rv = iasecc_parse_get_tlv(card, data + offs, &tlv);
++		rv = iasecc_parse_get_tlv(card, data + offs, data_len - offs, &tlv);
+ 		LOG_TEST_RET(ctx, rv, "iasecc_parse_prvkey() get and parse TLV error");
+ 
+ 		sc_log(ctx,
+@@ -516,7 +523,7 @@ iasecc_parse_pubkey(struct sc_card *card, unsigned char *data, size_t data_len,
+ 	while(offs < data_len)   {
+ 		struct iasecc_extended_tlv tlv;
+ 
+-		rv = iasecc_parse_get_tlv(card, data + offs, &tlv);
++		rv = iasecc_parse_get_tlv(card, data + offs, data_len - offs, &tlv);
+ 		LOG_TEST_RET(ctx, rv, "iasecc_parse_pubkey() get and parse TLV error");
+ 
+ 		sc_log(ctx,
+@@ -554,7 +561,7 @@ iasecc_parse_keyset(struct sc_card *card, unsigned char *data, size_t data_len,
+ 	while(offs < data_len)   {
+ 		struct iasecc_extended_tlv tlv;
+ 
+-		rv = iasecc_parse_get_tlv(card, data + offs, &tlv);
++		rv = iasecc_parse_get_tlv(card, data + offs, data_len - offs, &tlv);
+ 		LOG_TEST_RET(ctx, rv, "iasecc_parse_keyset() get and parse TLV error");
+ 
+ 		sc_log(ctx,
+@@ -586,7 +593,7 @@ iasecc_parse_docp(struct sc_card *card, unsigned char *data, size_t data_len, st
+ 	while(offs < data_len)   {
+ 		struct iasecc_extended_tlv tlv;
+ 
+-		rv = iasecc_parse_get_tlv(card, data + offs, &tlv);
++		rv = iasecc_parse_get_tlv(card, data + offs, data_len - offs, &tlv);
+ 		LOG_TEST_RET(ctx, rv, "iasecc_parse_get_tlv() get and parse TLV error");
+ 
+ 		sc_log(ctx,
+@@ -641,7 +648,7 @@ iasecc_parse_docp(struct sc_card *card, unsigned char *data, size_t data_len, st
+ 
+ 
+ static int
+-iasecc_sdo_parse_data(struct sc_card *card, unsigned char *data, struct iasecc_sdo *sdo)
++iasecc_sdo_parse_data(struct sc_card *card, unsigned char *data, size_t data_len, struct iasecc_sdo *sdo)
+ {
+ 	struct sc_context *ctx = card->ctx;
+ 	struct iasecc_extended_tlv tlv;
+@@ -650,7 +657,7 @@ iasecc_sdo_parse_data(struct sc_card *card, unsigned char *data, struct iasecc_s
+ 	LOG_FUNC_CALLED(ctx);
+ 	sc_log(ctx, "iasecc_sdo_parse_data() class %X; ref %X", sdo->sdo_class, sdo->sdo_ref);
+ 
+-	tlv_size = iasecc_parse_get_tlv(card, data, &tlv);
++	tlv_size = iasecc_parse_get_tlv(card, data, data_len, &tlv);
+ 	LOG_TEST_RET(ctx, tlv_size, "parse error: get TLV");
+ 
+ 	sc_log(ctx, "iasecc_sdo_parse_data() tlv.tag 0x%X", tlv.tag);
+@@ -735,7 +742,7 @@ iasecc_sdo_parse(struct sc_card *card, unsigned char *data, size_t data_len, str
+ 	LOG_FUNC_CALLED(ctx);
+ 
+ 	if (*data == IASECC_SDO_TEMPLATE_TAG)   {
+-		size_size = iasecc_parse_size(data + 1, &size);
++		size_size = iasecc_parse_size(data + 1, data_len - 1, &size);
+ 		LOG_TEST_RET(ctx, size_size, "parse error: invalid size data of IASECC_SDO_TEMPLATE");
+ 
+ 		data += size_size + 1;
+@@ -754,7 +761,7 @@ iasecc_sdo_parse(struct sc_card *card, unsigned char *data, size_t data_len, str
+ 	if (sdo->sdo_ref != (*(data + 2) & 0x3F))
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
+ 
+-	size_size = iasecc_parse_size(data + 3, &size);
++	size_size = iasecc_parse_size(data + 3, data_len - 3, &size);
+ 	LOG_TEST_RET(ctx, size_size, "parse error: invalid size data");
+ 
+ 	if (data_len != size + size_size + 3)
+@@ -766,7 +773,7 @@ iasecc_sdo_parse(struct sc_card *card, unsigned char *data, size_t data_len, str
+ 
+ 	offs = 3 + size_size;
+ 	for (; offs < data_len;)   {
+-		rv = iasecc_sdo_parse_data(card, data + offs, sdo);
++		rv = iasecc_sdo_parse_data(card, data + offs, data_len - offs, sdo);
+ 		LOG_TEST_RET(ctx, rv, "parse error: invalid SDO data");
+ 
+ 		offs += rv;
+@@ -812,7 +819,7 @@ iasecc_sdo_allocate_and_parse(struct sc_card *card, unsigned char *data, size_t
+ 	if (data_len == 3)
+ 		LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+ 
+-	size_size = iasecc_parse_size(data + 3, &size);
++	size_size = iasecc_parse_size(data + 3, data_len - 3, &size);
+ 	LOG_TEST_RET(ctx, size_size, "parse error: invalid size data");
+ 
+ 	if (data_len != size + size_size + 3)
+@@ -824,7 +831,7 @@ iasecc_sdo_allocate_and_parse(struct sc_card *card, unsigned char *data, size_t
+ 
+ 	offs = 3 + size_size;
+ 	for (; offs < data_len;)   {
+-		rv = iasecc_sdo_parse_data(card, data + offs, sdo);
++		rv = iasecc_sdo_parse_data(card, data + offs, data_len - offs, sdo);
+ 		LOG_TEST_RET(ctx, rv, "parse error: invalid SDO data");
+ 
+ 		offs += rv;
+@@ -1222,7 +1229,7 @@ iasecc_sdo_parse_card_answer(struct sc_context *ctx, unsigned char *data, size_t
+ 
+ 	memset(out, 0, sizeof(*out));
+ 	for (offs=0; offs<data_len; )   {
+-		size_size = iasecc_parse_size(data + 1, &size);
++		size_size = iasecc_parse_size(data + 1, data_len - 1, &size);
+ 
+ 		if (*(data + offs) == IASECC_CARD_ANSWER_TAG_DATA )   {
+ 			if (size > sizeof(out->data))
+@@ -1293,7 +1300,7 @@ iasecc_docp_copy(struct sc_context *ctx, struct iasecc_sdo_docp *in, struct iase
+ 	int rv;
+ 
+ 	LOG_FUNC_CALLED(ctx);
+-	if (!in || !out) 
++	if (!in || !out)
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
+ 
+ 	memset(out, 0, sizeof(struct iasecc_sdo_docp));
+-- 
+2.42.0
+
+From fbda61d0d276dc98b9d1d1e6810bbd21d19e3859 Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Fri, 27 Oct 2023 13:23:18 +0200
+Subject: [PATCH] iasecc: Avoid buffer overflow with invalid data
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=63587
+---
+ src/libopensc/iasecc-sdo.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/libopensc/iasecc-sdo.c b/src/libopensc/iasecc-sdo.c
+index 1e01c0df5..479b3c23b 100644
+--- a/src/libopensc/iasecc-sdo.c
++++ b/src/libopensc/iasecc-sdo.c
+@@ -371,15 +371,15 @@ iasecc_se_parse(struct sc_card *card, unsigned char *data, size_t data_len, stru
+ static int
+ iasecc_parse_size(unsigned char *data, size_t data_len, size_t *out)
+ {
+-	if (*data < 0x80 && data_len > 0) {
++	if (data_len > 0 && *data < 0x80) {
+ 		*out = *data;
+ 		return 1;
+ 	}
+-	else if (*data == 0x81 && data_len > 1) {
++	else if (data_len > 1 && *data == 0x81) {
+ 		*out = *(data + 1);
+ 		return 2;
+ 	}
+-	else if (*data == 0x82 && data_len > 2) {
++	else if (data_len > 2 && *data == 0x82) {
+ 		*out = *(data + 1) * 0x100 + *(data + 2);
+ 		return 3;
+ 	}
+-- 
+2.42.0
+
+From 2a4921ab23fd0853f327517636c50de947548161 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Tue, 29 Aug 2023 14:40:21 +0200
+Subject: [PATCH] iasecc: Check length of data when parsing crt
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=61797
+---
+ src/libopensc/iasecc-sdo.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/libopensc/iasecc-sdo.c b/src/libopensc/iasecc-sdo.c
+index b3e567dd5..3eeb03b91 100644
+--- a/src/libopensc/iasecc-sdo.c
++++ b/src/libopensc/iasecc-sdo.c
+@@ -204,7 +204,7 @@ iasecc_sdo_free(struct sc_card *card, struct iasecc_sdo *sdo)
+ 
+ 
+ static int
+-iasecc_crt_parse(struct sc_card *card, unsigned char *data, struct iasecc_se_info *se)
++iasecc_crt_parse(struct sc_card *card, unsigned char *data, size_t data_len, struct iasecc_se_info *se)
+ {
+ 	struct sc_context *ctx = card->ctx;
+ 	struct sc_crt crt;
+@@ -212,11 +212,16 @@ iasecc_crt_parse(struct sc_card *card, unsigned char *data, struct iasecc_se_inf
+ 
+ 	sc_log(ctx, "iasecc_crt_parse(0x%X) called", *data);
+ 
++	if (data_len < 2)
++		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
++
+ 	memset(&crt, 0, sizeof(crt));
+ 	crt.tag = *(data + 0);
+ 	len = *(data + 1);
+ 
+ 	for(offs = 2; offs < len + 2; offs += 3)   {
++		if ((size_t) offs + 2 >= data_len)
++			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_DATA);
+ 		sc_log(ctx, "iasecc_crt_parse(0x%X) CRT %X -> %X", *data, *(data + offs), *(data + offs + 2));
+ 		if (*(data + offs) == IASECC_CRT_TAG_USAGE)   {
+ 			crt.usage = *(data + offs + 2);
+@@ -368,7 +373,7 @@ iasecc_se_parse(struct sc_card *card, unsigned char *data, size_t data_len, stru
+ 
+ 	offs = 1 + size_size;
+ 	for (; offs < data_len;)   {
+-		rv = iasecc_crt_parse(card, data + offs, se);
++		rv = iasecc_crt_parse(card, data + offs, data_len - offs, se);
+ 		LOG_TEST_RET(ctx, rv, "parse error: invalid SE data");
+ 
+ 		offs += rv;
+-- 
+2.42.0
+
+From 6085994384a7171c5c68f6718d9db10ed77c5af1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Thu, 10 Aug 2023 13:56:24 +0200
+Subject: [PATCH] card-entersafe.c: Free modulus buffer in case of error
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=60680
+---
+ src/libopensc/card-entersafe.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/libopensc/card-entersafe.c b/src/libopensc/card-entersafe.c
+index eb31f7146..168894abd 100644
+--- a/src/libopensc/card-entersafe.c
++++ b/src/libopensc/card-entersafe.c
+@@ -1423,12 +1423,18 @@ static int entersafe_gen_key(sc_card_t *card, sc_entersafe_gen_key_data *data)
+ 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_OUT_OF_MEMORY);
+ 
+ 	p=rbuf;
+-	if (*p!='E')
++	if (*p!='E') {
++		free(data->modulus);
++		data->modulus = NULL;
+ 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
++	}
+ 	p+=2+p[1];
+ 	/* N */
+-	if (*p!='N')
++	if (*p!='N') {
++		free(data->modulus);
++		data->modulus = NULL;
+ 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
++	}
+ 	++p;
+ 	if(*p++>0x80)
+ 	{
+-- 
+2.42.0
+
+From 50f0985f6343eeac4044661d56807ee9286db42c Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Sun, 8 Oct 2023 19:08:39 +0200
+Subject: [PATCH] entersafe: Avoid buffer overflow during keygen
+
+Thanks oss-fuzz
+
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=63104
+---
+ src/libopensc/card-entersafe.c | 54 ++++++++++++++++++++--------------
+ 1 file changed, 32 insertions(+), 22 deletions(-)
+
+diff --git a/src/libopensc/card-entersafe.c b/src/libopensc/card-entersafe.c
+index 168894abd..feb9ebe18 100644
+--- a/src/libopensc/card-entersafe.c
++++ b/src/libopensc/card-entersafe.c
+@@ -1374,8 +1374,9 @@ static int entersafe_gen_key(sc_card_t *card, sc_entersafe_gen_key_data *data)
+ 	int	r;
+ 	size_t len = data->key_length >> 3;
+ 	sc_apdu_t apdu;
+-	u8 rbuf[300];
++	u8 rbuf[300] = {0};
+ 	u8 sbuf[4],*p;
++	size_t plen = 0;
+ 
+ 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+ 
+@@ -1418,40 +1419,49 @@ static int entersafe_gen_key(sc_card_t *card, sc_entersafe_gen_key_data *data)
+ 	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+ 	LOG_TEST_RET(card->ctx, sc_check_sw(card,apdu.sw1,apdu.sw2),"EnterSafe get pukey failed");
+ 
+-	data->modulus = malloc(len);
+-	if (!data->modulus)
+-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_OUT_OF_MEMORY);
+-
+-	p=rbuf;
+-	if (*p!='E') {
+-		free(data->modulus);
+-		data->modulus = NULL;
++	p = rbuf;
++	plen = apdu.resplen;
++	if (*p != 'E') {
+ 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
+ 	}
+-	p+=2+p[1];
++	if ((size_t)(p - rbuf) + 2 + p[1] >= plen) {
++		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
++	}
++	p += 2 + p[1];
+ 	/* N */
+-	if (*p!='N') {
+-		free(data->modulus);
+-		data->modulus = NULL;
++	if (*p != 'N') {
++		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
++	}
++	if ((size_t)(p - rbuf) + 2 >= plen) {
+ 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
+ 	}
+ 	++p;
+-	if(*p++>0x80)
++	if (*p++ > 0x80)
+ 	{
+-		 u8 len_bytes=(*(p-1))&0x0f;
+-		 size_t module_len=0;
+-		 while(len_bytes!=0)
++		u8 len_bytes = (*(p - 1)) & 0x0f;
++		size_t module_len = 0;
++		if ((size_t)(p - rbuf) + len_bytes >= plen) {
++			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
++		}
++		 while (len_bytes != 0)
+ 		 {
+-			  module_len=module_len<<8;
+-			  module_len+=*p++;
++			  module_len = module_len << 8;
++			  module_len += *p++;
+ 			  --len_bytes;
+ 		 }
+ 	}
+ 
+-	entersafe_reverse_buffer(p,len);
+-	memcpy(data->modulus,p,len);
++	if ((p - rbuf) + len >= plen) {
++		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_DATA);
++	}
+ 
+-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE,SC_SUCCESS);
++	data->modulus = malloc(len);
++	if (!data->modulus)
++		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_OUT_OF_MEMORY);
++	entersafe_reverse_buffer(p, len);
++	memcpy(data->modulus, p, len);
++
++	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_SUCCESS);
+ }
+ 
+ static int entersafe_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
+-- 
+2.42.0
+
+From b5f6370a35f151497838628f78111087eb8e7ff1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Wed, 3 May 2023 16:47:44 +0200
+Subject: [PATCH] Fix cycling fuzz pkcs11 test
+
+---
+ src/tests/fuzzing/fuzz_pkcs11.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/tests/fuzzing/fuzz_pkcs11.c b/src/tests/fuzzing/fuzz_pkcs11.c
+index b2a4c985e..b6e05c9ad 100644
+--- a/src/tests/fuzzing/fuzz_pkcs11.c
++++ b/src/tests/fuzzing/fuzz_pkcs11.c
+@@ -509,7 +509,7 @@ static void test_verify(const uint8_t *data, size_t size)
+ 		memcpy(in_buffer, verify_data, verify_data_size);
+ 		p11->C_Verify(session, in_buffer, verify_data_size, sig_buffer, sig_len);
+ 	} else {
+-		while (size > 0) {
++		while (verify_data_size > 0) {
+ 			to_process = verify_data_size < sizeof(in_buffer) ? verify_data_size : sizeof(in_buffer);
+ 			verify_data_size -= to_process;
+ 			memcpy(in_buffer, data, to_process);
+-- 
+2.42.0
+
+From ffbff25ec6c6d0ad3f8df76f57210698f7947fc3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Veronika=20Hanul=C3=ADkov=C3=A1?= <vhanulik@redhat.com>
+Date: Fri, 11 Aug 2023 09:44:57 +0200
+Subject: [PATCH] fuzz_pkcs11.c: Use valid data for verify
+
+Thanks OSS-Fuzz
+https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=60971
+---
+ src/tests/fuzzing/fuzz_pkcs11.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/tests/fuzzing/fuzz_pkcs11.c b/src/tests/fuzzing/fuzz_pkcs11.c
+index b6e05c9ad..fdc163b48 100644
+--- a/src/tests/fuzzing/fuzz_pkcs11.c
++++ b/src/tests/fuzzing/fuzz_pkcs11.c
+@@ -512,7 +512,7 @@ static void test_verify(const uint8_t *data, size_t size)
+ 		while (verify_data_size > 0) {
+ 			to_process = verify_data_size < sizeof(in_buffer) ? verify_data_size : sizeof(in_buffer);
+ 			verify_data_size -= to_process;
+-			memcpy(in_buffer, data, to_process);
++			memcpy(in_buffer, verify_data, to_process);
+ 			verify_data += to_process;
+ 
+ 			if (p11->C_VerifyUpdate(session, in_buffer, to_process) != CKR_OK)
+-- 
+2.42.0
+

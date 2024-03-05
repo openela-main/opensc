@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.23.0
-Release:        2%{?dist}
+Release:        4%{?dist}
 Summary:        Smart card library and applications
 
 License:        LGPLv2+
@@ -23,6 +23,39 @@ Patch10:         %{name}-0.23.0-openssl-ctx.patch
 Patch11:         %{name}-0.23.0-openpgp.patch
 # https://github.com/OpenSC/OpenSC/commit/81944d1529202bd28359bede57c0a15deb65ba8a
 Patch12:        %{name}-0.23.0-cardos-pkcs15init.patch
+# https://github.com/OpenSC/OpenSC/commit/bff98ff078a99e6864ba1a598fd7dc9af4a9476b
+# https://github.com/OpenSC/OpenSC/commit/0875c69295ef28b45fb682b37cede58fc36b7a1a
+Patch13:        %{name}-0.23.0-cache-offsets.patch
+# https://github.com/OpenSC/OpenSC/commit/868f76fb31255fd3fdacfc3e476452efeb61c3e7
+# https://github.com/OpenSC/OpenSC/commit/80cc5d30635f0d2c92b5099c0f9dc680d0ffce2f
+Patch14:        %{name}-0.23.0-pin-bypass.patch
+# https://github.com/OpenSC/OpenSC/commit/245efe608d083fd4e4ec96793fdefd218e26fde7
+# https://github.com/OpenSC/OpenSC/commit/440ca666eff10cc7011901252d20f3fc4ea23651
+# https://github.com/OpenSC/OpenSC/commit/41d61da8481582e12710b5858f8b635e0a71ab5e
+# https://github.com/OpenSC/OpenSC/commit/88880db0307a07e33cf2e1592bb029e9c170dfea
+# https://github.com/OpenSC/OpenSC/commit/638a5007a5d240d6fa901aa822cfeef94fe36e85
+# https://github.com/OpenSC/OpenSC/commit/c449a181a6988cc1e8dc8764d23574e48cdc3fa6
+# https://github.com/OpenSC/OpenSC/commit/5631e9843c832a99769def85b7b9b68b4e3e3959
+# https://github.com/OpenSC/OpenSC/commit/e7f81d86dcdc751f4737f4b29a99bfc54d29c5c9
+# https://github.com/OpenSC/OpenSC/commit/df5a176bfdf8c52ba89c7fef1f82f6f3b9312bc1
+# https://github.com/OpenSC/OpenSC/commit/578aed8391ef117ca64a9e0cba8e5c264368a0ec
+# https://github.com/OpenSC/OpenSC/commit/4013a807492568bf9907cfb3df41f130ac83c7b9
+# https://github.com/OpenSC/OpenSC/commit/09164045facaeae193feb48d9c2fc5cc4321e8a
+# https://github.com/OpenSC/OpenSC/commit/fc2c20c3f895569eeb58328bb882aec07325d3b
+# https://github.com/OpenSC/OpenSC/commit/3b9129bd3cfc6ac57d5554e015c3df85f5076dc
+# https://github.com/OpenSC/OpenSC/commit/bda61d0d276dc98b9d1d1e6810bbd21d19e3859
+# https://github.com/OpenSC/OpenSC/commit/a4921ab23fd0853f327517636c50de947548161
+# https://github.com/OpenSC/OpenSC/commit/085994384a7171c5c68f6718d9db10ed77c5af1
+# https://github.com/OpenSC/OpenSC/commit/0f0985f6343eeac4044661d56807ee9286db42c
+# https://github.com/OpenSC/OpenSC/commit/5f6370a35f151497838628f78111087eb8e7ff1
+# https://github.com/OpenSC/OpenSC/commit/fbff25ec6c6d0ad3f8df76f57210698f7947fc3
+Patch15:        %{name}-0.23.0-pkcs15init.patch
+# https://github.com/OpenSC/OpenSC/commit/cde2e050ec4f2f1b7db38429aa4e9c0f4656308c
+# https://github.com/OpenSC/OpenSC/commit/f1993dc4e0b33050b8f72a3558ee88b24c4063b2
+Patch16:        %{name}-0.23.0-myeid-sym.patch
+# https://github.com/OpenSC/OpenSC/pull/2948
+# https://github.com/OpenSC/OpenSC/pull/3016
+Patch17:        %{name}-0.23.0-constant-time-pkcs1.5.patch
 
 BuildRequires:  make
 BuildRequires:  pcsc-lite-devel
@@ -66,6 +99,11 @@ every software/card that does so, too.
 %patch10 -p1 -b .ossl3context
 %patch11 -p1 -b .openpgp
 %patch12 -p1 -b .cardos-pkcs15init
+%patch13 -p1 -b .cache-offsets
+%patch14 -p1 -b .pin-bypass
+%patch15 -p1 -b .pkcs15init
+%patch16 -p1 -b .myeid-sym
+%patch17 -p1 -b .constant-time-pkcs1
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -207,6 +245,16 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
+* Thu Feb 08 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-4
+- Fix CVE-2023-5992: Side-channel leaks while stripping encryption PKCS#1.5 padding
+
+* Thu Nov 30 2023 Jakub Jelen <jjelen@redhat.com> - 0.23.0-3
+- Fix file caching with different offsets (RHEL-4079)
+- Fix CVE-2023-40660: Potential PIN bypass
+- Fix CVE-2023-40661: Dynamic analyzers reports in pkcs15init
+- Fix CVE-2023-4535: Out-of-bounds read in MyEID driver handling encryption using symmetric keys
+- Fix CVE-2023-5992: Side-channel leaks while stripping encryption PKCS#1.5 padding
+
 * Thu May 25 2023 Jakub Jelen <jjelen@redhat.com> - 0.23.0-2
 - Fix regression in handling OpenPGP cards
 - Fix CVE-2023-2977: buffer overrun in pkcs15init for cardos
