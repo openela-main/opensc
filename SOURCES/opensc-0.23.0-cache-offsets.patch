@@ -1,0 +1,96 @@
+From bff98ff078a99e6864ba1a598fd7dc9af4a9476b Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Thu, 7 Sep 2023 13:23:04 +0200
+Subject: [PATCH] cache: Honor the file offset when writing cache
+
+When the reads are not consecutive, avoid caching anything after the gaps.
+
+Signed-off-by: Jakub Jelen <jjelen@redhat.com>
+---
+ src/libopensc/pkcs15-cache.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/src/libopensc/pkcs15-cache.c b/src/libopensc/pkcs15-cache.c
+index 6ebe35a8af..61af35fc5a 100644
+--- a/src/libopensc/pkcs15-cache.c
++++ b/src/libopensc/pkcs15-cache.c
+@@ -195,6 +195,7 @@ int sc_pkcs15_cache_file(struct sc_pkcs15_card *p15card,
+ {
+ 	char fname[PATH_MAX];
+ 	int r;
++	long len;
+ 	FILE *f;
+ 	size_t c;
+ 
+@@ -202,22 +203,33 @@ int sc_pkcs15_cache_file(struct sc_pkcs15_card *p15card,
+ 	if (r != 0)
+ 		return r;
+ 
+-	f = fopen(fname, "wb");
++	f = fopen(fname, "ab");
+ 	/* If the open failed because the cache directory does
+ 	 * not exist, create it and a re-try the fopen() call.
+ 	 */
+ 	if (f == NULL && errno == ENOENT) {
+ 		if ((r = sc_make_cache_dir(p15card->card->ctx)) < 0)
+ 			return r;
+-		f = fopen(fname, "wb");
++		f = fopen(fname, "ab");
+ 	}
+ 	if (f == NULL)
+ 		return 0;
+ 
++	/* we opened the file for appending so we should be at the end of file.
++	 * The ftell() will give use the length of the file */
++	len = ftell(f);
++	if (len > path->index) {
++		/* override previous cache records on this location */
++		fseek(f, path->index, SEEK_SET);
++	} else if (path->index > len) {
++		/* We miss some bytes so we will not cache this chunk */
++		return 0;
++	}
++
+ 	c = fwrite(buf, 1, bufsize, f);
+ 	fclose(f);
+ 	if (c != bufsize) {
+-		sc_log(p15card->card->ctx, 
++		sc_log(p15card->card->ctx,
+ 			 "fwrite() wrote only %"SC_FORMAT_LEN_SIZE_T"u bytes",
+ 			 c);
+ 		unlink(fname);
+
+From 0875c69295ef28b45fb682b37cede58fc36b7a1a Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Fri, 15 Sep 2023 19:17:53 +0200
+Subject: [PATCH] pkcs15-cache: Avoid fd leaks and check return values
+
+CID 401725
+CID 401726
+
+Thanks coverity
+---
+ src/libopensc/pkcs15-cache.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/libopensc/pkcs15-cache.c b/src/libopensc/pkcs15-cache.c
+index 61af35fc5a..bae5797fe2 100644
+--- a/src/libopensc/pkcs15-cache.c
++++ b/src/libopensc/pkcs15-cache.c
+@@ -220,9 +220,14 @@ int sc_pkcs15_cache_file(struct sc_pkcs15_card *p15card,
+ 	len = ftell(f);
+ 	if (len > path->index) {
+ 		/* override previous cache records on this location */
+-		fseek(f, path->index, SEEK_SET);
++		r = fseek(f, path->index, SEEK_SET);
++		if (r != 0) {
++			fclose(f);
++			return 0;
++		}
+ 	} else if (path->index > len) {
+ 		/* We miss some bytes so we will not cache this chunk */
++		fclose(f);
+ 		return 0;
+ 	}
+ 
+

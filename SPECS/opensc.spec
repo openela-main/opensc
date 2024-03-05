@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.20.0
-Release:        6%{?dist}
+Release:        8%{?dist}
 Summary:        Smart card library and applications
 
 Group:          System Environment/Libraries
@@ -54,7 +54,33 @@ Patch18:        opensc-0.20.0-CVE-2023-2977.patch
 # 295f399304644e6b0acde267ac410d0aae4a1aee
 # ca01aa7a8edc8280a5ceadebb472c2e3c198d8c2
 Patch19:        opensc-0.20.0-reader-removal.patch
-
+# https://github.com/OpenSC/OpenSC/commit/bff98ff078a99e6864ba1a598fd7dc9af4a9476b
+# https://github.com/OpenSC/OpenSC/commit/0875c69295ef28b45fb682b37cede58fc36b7a1a
+Patch20:        %{name}-0.23.0-cache-offsets.patch
+# https://github.com/OpenSC/OpenSC/commit/868f76fb31255fd3fdacfc3e476452efeb61c3e7
+# https://github.com/OpenSC/OpenSC/commit/80cc5d30635f0d2c92b5099c0f9dc680d0ffce2f
+Patch21:        %{name}-0.23.0-pin-bypass.patch
+# https://github.com/OpenSC/OpenSC/commit/245efe608d083fd4e4ec96793fdefd218e26fde7
+# https://github.com/OpenSC/OpenSC/commit/440ca666eff10cc7011901252d20f3fc4ea23651
+# https://github.com/OpenSC/OpenSC/commit/41d61da8481582e12710b5858f8b635e0a71ab5e
+# https://github.com/OpenSC/OpenSC/commit/88880db0307a07e33cf2e1592bb029e9c170dfea
+# https://github.com/OpenSC/OpenSC/commit/638a5007a5d240d6fa901aa822cfeef94fe36e85
+# https://github.com/OpenSC/OpenSC/commit/c449a181a6988cc1e8dc8764d23574e48cdc3fa6
+# https://github.com/OpenSC/OpenSC/commit/5631e9843c832a99769def85b7b9b68b4e3e3959
+# https://github.com/OpenSC/OpenSC/commit/e7f81d86dcdc751f4737f4b29a99bfc54d29c5c9
+# https://github.com/OpenSC/OpenSC/commit/df5a176bfdf8c52ba89c7fef1f82f6f3b9312bc1
+# https://github.com/OpenSC/OpenSC/commit/578aed8391ef117ca64a9e0cba8e5c264368a0ec
+# https://github.com/OpenSC/OpenSC/commit/013a807492568bf9907cfb3df41f130ac83c7b9
+# https://github.com/OpenSC/OpenSC/commit/fc2c20c3f895569eeb58328bb882aec07325d3b
+# https://github.com/OpenSC/OpenSC/commit/3b9129bd3cfc6ac57d5554e015c3df85f5076dc
+# https://github.com/OpenSC/OpenSC/commit/bda61d0d276dc98b9d1d1e6810bbd21d19e3859
+# https://github.com/OpenSC/OpenSC/commit/a4921ab23fd0853f327517636c50de947548161
+# https://github.com/OpenSC/OpenSC/commit/085994384a7171c5c68f6718d9db10ed77c5af1
+# https://github.com/OpenSC/OpenSC/commit/0f0985f6343eeac4044661d56807ee9286db42c
+Patch22:        %{name}-0.23.0-pkcs15init.patch
+# https://github.com/OpenSC/OpenSC/pull/2948
+# https://github.com/OpenSC/OpenSC/pull/3016
+Patch23:        %{name}-0.23.0-constant-time-pkcs1.patch
 
 BuildRequires:  pcsc-lite-devel
 BuildRequires:  readline-devel
@@ -96,6 +122,10 @@ every software/card that does so, too.
 %patch17 -p1 -b .idprime
 %patch18 -p1 -b .CVE-2023-2977
 %patch19 -p1 -b .reader-removal
+%patch20 -p1 -b .cache-offsets
+%patch21 -p1 -b .pin-bypass
+%patch22 -p1 -b .pkcs15init
+%patch23 -p1 -b .constant-time-pkcs1.5
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -254,6 +284,15 @@ fi
 
 
 %changelog
+* Thu Feb 08 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.20.0-8
+- Fix CVE-2023-5992: Side-channel leaks while stripping encryption PKCS#1.5 padding
+
+* Thu Nov 30 2023 Jakub Jelen <jjelen@redhat.com> - 0.20.0-7
+- Fix file caching with different offsets (RHEL-4077)
+- Fix CVE-2023-40660: Potential PIN bypass
+- Fix CVE-2023-40661: Dynamic analyzers reports in pkcs15init
+- Fix CVE-2023-5992: Marvin: Side-channel leaks while stripping encryption PKCS#1.5 padding
+
 * Tue Jul 11 2023 Jakub Jelen <jjelen@redhat.com> - 0.20.0-6
 - Fix introduced issues tagged by coverity (RHEL-765)
 
