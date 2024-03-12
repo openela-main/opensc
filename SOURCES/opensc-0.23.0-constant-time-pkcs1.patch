@@ -24,64 +24,48 @@ index 5153428dc..9ecbffe8f 100644
  	if [ -x "$(CLANGTIDY)" ]; then clang-tidy -config='' -header-filter=.* $(TIDY_FILES) -- $(TIDY_FLAGS); fi
 diff --git a/src/common/constant-time.h b/src/common/constant-time.h
 new file mode 100644
-index 0000000000..40c3e500c2
+index 000000000..f70251f5d
 --- /dev/null
 +++ b/src/common/constant-time.h
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,108 @@
 +/* Original source: https://github.com/openssl/openssl/blob/9890cc42daff5e2d0cad01ac4bf78c391f599a6e/include/internal/constant_time.h */
 +
 +#ifndef CONSTANT_TIME_H
-+#define CONSTANT_TIME_H
++# define CONSTANT_TIME_H
 +
-+#include <stdlib.h>
-+#include <string.h>
++# include <stdlib.h>
++# include <string.h>
 +
 +#if !defined(inline)
-+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-+#define constant_inline inline
-+#elif defined(__GNUC__) && __GNUC__ >= 2
-+#elif defined(__GNUC__) && __GNUC__ >= 2
-+#elif defined(_MSC_VER)
-+#define constant_inline __inline
-+#else
-+#define constant_inline
-+#endif
-+#else			       /* use what caller wants as inline  may be from config.h */
-+#define constant_inline inline /* inline */
++# if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
++#  define constant_inline  inline
++# elif defined(__GNUC__) && __GNUC__>=2
++#  define constant_inline  __inline__
++# elif defined(_MSC_VER)
++#  define constant_inline __inline
++# else
++#  define constant_inline
++# endif
++#else    /* use what caller wants as inline  may be from config.h */
++#   define constant_inline  inline           /* inline */
 +#endif
 +
-+/*-
-+ * The boolean methods return a bitmask of all ones (0xff...f) for true
-+ * and 0 for false. For example,
-+ *      if (a < b) {
-+ *        c = a;
-+ *      } else {
-+ *        c = b;
-+ *      }
-+ * can be written as
-+ *      unsigned int lt = constant_time_lt(a, b);
-+ *      c = constant_time_select(lt, a, b);
-+ */
-+
-+static constant_inline unsigned int
-+value_barrier(unsigned int a)
++static constant_inline unsigned int value_barrier(unsigned int a)
 +{
-+	volatile unsigned int r = a;
-+	return r;
++    volatile unsigned int r = a;
++    return r;
 +}
 +
-+static constant_inline size_t
-+value_barrier_s(size_t a)
++static constant_inline size_t value_barrier_s(size_t a)
 +{
-+	volatile size_t r = a;
-+	return r;
++    volatile size_t r = a;
++    return r;
 +}
 +
 +/* MSB */
-+static constant_inline size_t
-+constant_time_msb_s(size_t a)
++static constant_inline size_t constant_time_msb_s(size_t a)
 +{
-+	return 0 - (a >> (sizeof(a) * 8 - 1));
++    return 0 - (a >> (sizeof(a) * 8 - 1));
 +}
 +
 +static constant_inline unsigned int
@@ -103,10 +87,9 @@ index 0000000000..40c3e500c2
 +	return (unsigned char)constant_time_select(mask, a, b);
 +}
 +
-+static constant_inline size_t
-+constant_time_select_s(size_t mask, size_t a, size_t b)
++static constant_inline size_t constant_time_select_s(size_t mask, size_t a, size_t b)
 +{
-+	return (value_barrier_s(mask) & a) | (value_barrier_s(~mask) & b);
++    return (value_barrier_s(mask) & a) | (value_barrier_s(~mask) & b);
 +}
 +
 +/* Zero */
@@ -116,17 +99,15 @@ index 0000000000..40c3e500c2
 +	return constant_time_msb(~a & (a - 1));
 +}
 +
-+static constant_inline size_t
-+constant_time_is_zero_s(size_t a)
++static constant_inline size_t constant_time_is_zero_s(size_t a)
 +{
-+	return constant_time_msb_s(~a & (a - 1));
++    return constant_time_msb_s(~a & (a - 1));
 +}
 +
 +/* Comparison*/
-+static constant_inline size_t
-+constant_time_lt_s(size_t a, size_t b)
++static constant_inline size_t constant_time_lt_s(size_t a, size_t b)
 +{
-+	return constant_time_msb_s(a ^ ((a ^ b) | ((a - b) ^ b)));
++    return constant_time_msb_s(a ^ ((a ^ b) | ((a - b) ^ b)));
 +}
 +
 +static constant_inline unsigned int
@@ -149,19 +130,12 @@ index 0000000000..40c3e500c2
 +	return constant_time_is_zero(a ^ b);
 +}
 +
-+static constant_inline size_t
-+constant_time_eq_s(size_t a, size_t b)
++static constant_inline size_t constant_time_eq_s(size_t a, size_t b)
 +{
-+	return constant_time_is_zero_s(a ^ b);
++    return constant_time_is_zero_s(a ^ b);
 +}
 +
-+static constant_inline unsigned int
-+constant_time_eq_i(int a, int b)
-+{
-+	return constant_time_eq((unsigned int)a, (unsigned int)b);
-+}
-+
-+#endif /* CONSTANT_TIME_H */
++#endif                          /* CONSTANT_TIME_H */
 diff --git a/src/libopensc/internal.h b/src/libopensc/internal.h
 index 74014235a..13eccfa1a 100644
 --- a/src/libopensc/internal.h
@@ -174,17 +148,16 @@ index 74014235a..13eccfa1a 100644
 +		unsigned int data_len, u8 *out, unsigned int *out_len);
  int sc_pkcs1_strip_digest_info_prefix(unsigned int *algorithm,
  		const u8 *in_dat, size_t in_len, u8 *out_dat, size_t *out_len);
-
+ 
 diff --git a/src/libopensc/padding.c b/src/libopensc/padding.c
-index ca47733a4e..ddb3061134 100644
+index 283746699..ceb2a1e21 100644
 --- a/src/libopensc/padding.c
 +++ b/src/libopensc/padding.c
-@@ -32,10 +32,13 @@
- #include <string.h>
+@@ -33,9 +33,12 @@
  #include <stdlib.h>
  
-+#include "common/constant-time.h"
  #include "internal.h"
++#include "common/constant-time.h"
  
  /* TODO doxygen comments */
  
@@ -193,36 +166,24 @@ index ca47733a4e..ddb3061134 100644
  /*
   * Prefixes for pkcs-v1 signatures
   */
-@@ -144,44 +147,82 @@ sc_pkcs1_strip_01_padding(struct sc_cont
+@@ -184,6 +187,84 @@ sc_pkcs1_strip_02_padding(sc_context_t *ctx, const u8 *data, size_t len, u8 *out
+ 	LOG_FUNC_RETURN(ctx, len - n);
  }
  
- 
--/* remove pkcs1 BT02 padding (adding BT02 padding is currently not
-- * needed/implemented) */
-+/* Remove pkcs1 BT02 padding (adding BT02 padding is currently not
-+ * needed/implemented) in constant-time.
-+ * Original source: https://github.com/openssl/openssl/blob/9890cc42daff5e2d0cad01ac4bf78c391f599a6e/crypto/rsa/rsa_pk1.c#L171 */
- int
--sc_pkcs1_strip_02_padding(sc_context_t *ctx, const u8 *data, size_t len, u8 *out, size_t *out_len)
++/* Original source: https://github.com/openssl/openssl/blob/9890cc42daff5e2d0cad01ac4bf78c391f599a6e/crypto/rsa/rsa_pk1.c#L171 */
++int
 +sc_pkcs1_strip_02_padding_constant_time(sc_context_t *ctx, unsigned int n, const u8 *data, unsigned int data_len, u8 *out, unsigned int *out_len)
- {
--	unsigned int	n = 0;
--
++{
 +	unsigned int i = 0;
-+	u8 *msg, *msg_orig = NULL;
++	u8 *msg = NULL;
 +	unsigned int good, found_zero_byte, mask;
 +	unsigned int zero_index = 0, msg_index, mlen = -1, len = 0;
- 	LOG_FUNC_CALLED(ctx);
--	if (data == NULL || len < 3)
++	LOG_FUNC_CALLED(ctx);
 +
 +	if (data == NULL || data_len <= 0 || data_len > n || n < SC_PKCS1_PADDING_MIN_SIZE)
- 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
- 
--	/* skip leading zero byte */
--	if (*data == 0) {
--		data++;
--		len--;
-+	msg = msg_orig = calloc(n, sizeof(u8));
++		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
++
++	msg = calloc(n, sizeof(u8));
 +	if (msg == NULL)
 +		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
 +
@@ -250,25 +211,8 @@ index ca47733a4e..ddb3061134 100644
 +		unsigned int equals0 = constant_time_is_zero(msg[i]);
 +		zero_index = constant_time_select(~found_zero_byte & equals0, i, zero_index);
 +		found_zero_byte |= equals0;
- 	}
--	if (data[0] != 0x02)
--		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_PADDING);
--	/* skip over padding bytes */
--	for (n = 1; n < len && data[n]; n++)
--		;
--	/* Must be at least 8 pad bytes */
--	if (n >= len || n < 9)
--		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_PADDING);
--	n++;
--	if (out == NULL)
--		/* just check the padding */
--		LOG_FUNC_RETURN(ctx, SC_SUCCESS);
- 
--	/* Now move decrypted contents to head of buffer */
--	if (*out_len < len - n)
--		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
--	*out_len = len - n;
--	memmove(out, data + n, *out_len);
++	}
++
 +	// zero_index stands for index of last found zero
 +	good &= constant_time_ge(zero_index, 2 + 8);
 +
@@ -278,12 +222,14 @@ index ca47733a4e..ddb3061134 100644
 +	// length of message
 +	mlen = data_len - msg_index;
 +
++	// check that there is a message after padding
++	good &= constant_time_ge(mlen, 1);
 +	// check that message fits into out buffer
 +	good &= constant_time_ge(*out_len, mlen);
 +
 +	// move the result in-place by |num|-SC_PKCS1_PADDING_MIN_SIZE-|mlen| bytes to the left.
 +	*out_len = constant_time_select(constant_time_lt(n - SC_PKCS1_PADDING_MIN_SIZE, *out_len),
-+			n - SC_PKCS1_PADDING_MIN_SIZE, *out_len);
++									n - SC_PKCS1_PADDING_MIN_SIZE, *out_len);
 +	for (msg_index = 1; msg_index < n - SC_PKCS1_PADDING_MIN_SIZE; msg_index <<= 1) {
 +		mask = ~constant_time_eq(msg_index & (n - SC_PKCS1_PADDING_MIN_SIZE - mlen), 0);
 +		for (i = SC_PKCS1_PADDING_MIN_SIZE; i < n - msg_index; i++)
@@ -297,21 +243,19 @@ index ca47733a4e..ddb3061134 100644
 +		msg_index = constant_time_select(mask, i + SC_PKCS1_PADDING_MIN_SIZE, 0); // to now overflow msg buffer
 +		out[i] = constant_time_select_8(mask, msg[msg_index], out[i]);
 +	}
- 
--	sc_log(ctx, "stripped output(%"SC_FORMAT_LEN_SIZE_T"u): %s", len - n,
--	       sc_dump_hex(out, len - n));
--	LOG_FUNC_RETURN(ctx, len - n);
-+	free(msg_orig);
++
++	free(msg);
 +	return constant_time_select(good, mlen, SC_ERROR_WRONG_PADDING);
- }
- 
++}
++
  /* add/remove DigestInfo prefix */
-
+ static int sc_pkcs1_add_digest_info_prefix(unsigned int algorithm,
+ 	const u8 *in, size_t in_len, u8 *out, size_t *out_len)
 diff --git a/src/libopensc/pkcs15-sec.c b/src/libopensc/pkcs15-sec.c
-index a019af460f..f7ee819d65 100644
+index 7c3a39432..b5e492fe2 100644
 --- a/src/libopensc/pkcs15-sec.c
 +++ b/src/libopensc/pkcs15-sec.c
-@@ -286,12 +286,14 @@ int sc_pkcs15_decipher(struct sc_pkcs15_
+@@ -308,12 +308,13 @@ int sc_pkcs15_decipher(struct sc_pkcs15_card *p15card,
  
  	/* Strip any padding */
  	if (pad_flags & SC_ALGORITHM_RSA_PAD_PKCS1) {
@@ -319,47 +263,34 @@ index a019af460f..f7ee819d65 100644
 -		r = sc_pkcs1_strip_02_padding(ctx, out, s, out, &s);
 -		LOG_TEST_RET(ctx, r, "Invalid PKCS#1 padding");
 +		unsigned int s = r;
-+		unsigned int key_size = (unsigned int)alg_info->key_length;
++		unsigned int key_size = alg_info->key_length;
 +		r = sc_pkcs1_strip_02_padding_constant_time(ctx, key_size / 8, out, s, out, &s);
 +		/* for keeping PKCS#1 v1.5 depadding constant-time, do not log error here */
  	}
  
 -	LOG_FUNC_RETURN(ctx, r);
-+	/* do not log error code to prevent side channel attack */
 +	return r;
  }
  
  /* derive one key from another. RSA can use decipher, so this is for only ECDH
-
 diff --git a/src/pkcs11/framework-pkcs15.c b/src/pkcs11/framework-pkcs15.c
-index f75a3dbaec..632681df63 100644
+index 809cd72d9..9c75759a0 100644
 --- a/src/pkcs11/framework-pkcs15.c
 +++ b/src/pkcs11/framework-pkcs15.c
-@@ -18,6 +18,7 @@
-  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-  */
- 
+@@ -28,6 +28,7 @@
+ #include "libopensc/cardctl.h"
+ #include "ui/notify.h"
+ #include "common/compat_strnlen.h"
 +#include "common/constant-time.h"
- #include "config.h"
- #include <stdlib.h>
- #include <string.h>
-@@ -4174,7 +4175,8 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_se
- 	struct pkcs15_fw_data *fw_data = NULL;
- 	struct pkcs15_prkey_object *prkey;
- 	unsigned char decrypted[512]; /* FIXME: Will not work for keys above 4096 bits */
--	int	buff_too_small, rv, flags = 0, prkey_has_path = 0;
-+	int rv, flags = 0, prkey_has_path = 0;
-+	CK_ULONG mask, good, rv_pkcs11;
- 
- 	sc_log(context, "Initiating decryption.");
- 
-@@ -4246,27 +4248,54 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_se
+ #ifdef ENABLE_OPENSSL
+ #include <openssl/sha.h>
+ #else
+@@ -4603,15 +4604,51 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
  	rv = sc_pkcs15_decipher(fw_data->p15_card, prkey->prv_p15obj, flags,
  			pEncryptedData, ulEncryptedDataLen, decrypted, sizeof(decrypted));
  
 -	if (rv < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path)
-+	/* skip for PKCS#1 v1.5 padding prevent side channel attack */
-+	if (!(flags & SC_ALGORITHM_RSA_PAD_PKCS1) &&
++	if (!((flags & SC_ALGORITHM_RSA_PAD_PKCS1) && constant_time_eq_s(rv, SC_ERROR_WRONG_PADDING)) &&
 +			rv < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path)
  		if (reselect_app_df(fw_data->p15_card) == SC_SUCCESS)
  			rv = sc_pkcs15_decipher(fw_data->p15_card, prkey->prv_p15obj, flags,
@@ -368,111 +299,66 @@ index f75a3dbaec..632681df63 100644
  	sc_unlock(p11card->card);
  
 -	sc_log(context, "Decryption complete. Result %d.", rv);
-+	sc_log(context, "Decryption complete.");
- 
--	if (rv < 0)
-+	/* Handle following code in constant-time
- 		return sc_to_cryptoki_error(rv, "C_Decrypt");
-+	 * to prevent Marvin attack for PKCS#1 v1.5 padding. */
- 
--	buff_too_small = (*pulDataLen < (CK_ULONG)rv);
--	*pulDataLen = rv;
--	if (pData == NULL_PTR)
--		return CKR_OK;
--	if (buff_too_small)
--		return CKR_BUFFER_TOO_SMALL;
--	memcpy(pData, decrypted, *pulDataLen);
--
--	return CKR_OK;
-+	/* only padding error must be handled in constant-time way,
-+	 * other error can be returned straight away */
-+	if ((~constant_time_eq_i(rv, SC_ERROR_WRONG_PADDING) & constant_time_lt_s(sizeof(decrypted), (size_t)rv)))
-+		return sc_to_cryptoki_error(rv, "C_Decrypt");
-+	
-+	/* check rv for padding error */
-+	good = ~constant_time_eq_i(rv, SC_ERROR_WRONG_PADDING);
-+	rv_pkcs11 = sc_to_cryptoki_error(SC_ERROR_WRONG_PADDING, "C_Decrypt");
-+	rv_pkcs11 = constant_time_select_s(good, CKR_OK, rv_pkcs11);
++	/* Handle buffer after PKCS#1 v1.5 depadding constant-time */
++	if (flags & SC_ALGORITHM_RSA_PAD_PKCS1) {
++		CK_ULONG mask, good, rv_pkcs11;
 +
-+	if (pData == NULL_PTR) {
-+		/* set length only if no error */
++		sc_log(context, "Decryption complete.");
++		/* only padding error must be handled in constant-time way */
++		if ((~constant_time_eq_s(rv, SC_ERROR_WRONG_PADDING) & constant_time_lt_s(sizeof(decrypted), rv)))
++			return sc_to_cryptoki_error(rv, "C_Decrypt");
++
++		/* check rv for error */
++		good = ~constant_time_eq_s(rv, SC_ERROR_WRONG_PADDING);
++		rv_pkcs11 = constant_time_select_s(good, CKR_OK, SC_ERROR_WRONG_PADDING);
++		if (pData == NULL_PTR) {
++			/* set length only if rv good */
++			*pulDataLen = constant_time_select_s(good, rv, *pulDataLen);
++			/* return error only if original rv < 0 */
++			return rv_pkcs11;
++		}
++
++		/* check whether *pulDataLen < rv and set return value accordingly */
++		mask = good & constant_time_lt_s(*pulDataLen, rv);
++		rv_pkcs11 = constant_time_select_s(mask, CKR_BUFFER_TOO_SMALL, rv_pkcs11);
++		good &= ~mask;
+ 
++		/* move everything from decrypted into out buffer, if rv is ok */
++		for (CK_ULONG i = 0; i < *pulDataLen; i++) { /* iterate over whole pData to not disclose real depadded length */
++			CK_ULONG msg_index;
++			mask = good & constant_time_lt_s(i, sizeof(decrypted)); /* i should be in the bounds of decrypted */
++			mask &= constant_time_lt_s(i, constant_time_select_s(good, rv, 0)); /* check that is in bounds of depadded message */
++			msg_index = constant_time_select_s(mask, i, 0);
++			pData[i] = constant_time_select_8(mask, decrypted[msg_index], pData[i]);
++		}
 +		*pulDataLen = constant_time_select_s(good, rv, *pulDataLen);
-+		/* return error only if original rv < 0 */
 +		return rv_pkcs11;
 +	}
 +
-+	/* check whether *pulDataLen < rv and set return value for small output buffer */
-+	mask = good & constant_time_lt_s(*pulDataLen, rv);
-+	rv_pkcs11 = constant_time_select_s(mask, CKR_BUFFER_TOO_SMALL, rv_pkcs11);
-+	good &= ~mask;
-+
-+	/* move everything from decrypted into out buffer constant-time, if rv is ok */
-+	for (CK_ULONG i = 0; i < *pulDataLen; i++) { /* iterate over whole pData to not disclose real depadded length */
-+		CK_ULONG msg_index;
-+		mask = good & constant_time_lt_s(i, sizeof(decrypted));		    /* i should be in the bounds of decrypted */
-+		mask &= constant_time_lt_s(i, constant_time_select_s(good, rv, 0)); /* check that is in bounds of depadded message */
-+		msg_index = constant_time_select_s(mask, i, 0);
-+		pData[i] = constant_time_select_8(mask, decrypted[msg_index], pData[i]);
-+	}
-+	*pulDataLen = constant_time_select_s(good, rv, *pulDataLen);
-+	/* do not log error code to prevent side channel attack */
-+	return rv_pkcs11;
++	sc_log(context, "Decryption complete. Result %d.", rv);
+ 	if (rv < 0)
+ 		return sc_to_cryptoki_error(rv, "C_Decrypt");
+ 
+@@ -4622,7 +4659,6 @@ pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
+ 	if (buff_too_small)
+ 		return CKR_BUFFER_TOO_SMALL;
+ 	memcpy(pData, decrypted, *pulDataLen);
+-
+ 	return CKR_OK;
  }
-
-
-diff --git a/src/pkcs11/mechanism.c b/src/pkcs11/mechanism.c
-index 03495265a4..d3f0434231 100644
---- a/src/pkcs11/mechanism.c
-+++ b/src/pkcs11/mechanism.c
-@@ -23,6 +23,7 @@
- #include <stdlib.h>
- #include <string.h>
  
-+#include "common/constant-time.h"
- #include "sc-pkcs11.h"
- 
- /* Also used for verification data */
-@@ -1089,7 +1090,9 @@ sc_pkcs11_decr(struct sc_pkcs11_session
- 	rv = op->type->decrypt(op, pEncryptedData, ulEncryptedDataLen,
- 	                       pData, pulDataLen);
- 
--	if (rv != CKR_BUFFER_TOO_SMALL && pData != NULL)
-+	/* terminate session for any return value except CKR_BUFFER_TOO_SMALL,
-+	 * perform check in time side-channel free way to prevent Marvin attack */
-+	if (!constant_time_eq_s(rv, CKR_BUFFER_TOO_SMALL) && pData != NULL)
- 		session_stop_operation(session, SC_PKCS11_OPERATION_DECRYPT);
- 
- 	return rv;
-
-
-
-diff --git a/src/pkcs11/pkcs11-object.c b/src/pkcs11/pkcs11-object.c
-index f04c0b4c56..b023911213 100644
---- a/src/pkcs11/pkcs11-object.c
-+++ b/src/pkcs11/pkcs11-object.c
-@@ -926,7 +926,8 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSessi
- 		rv = reset_login_state(session->slot, rv);
- 	}
- 
--	sc_log(context, "C_Decrypt() = %s", lookup_enum ( RV_T, rv ));
-+	/* do not log error code to prevent side channel attack */
-+	sc_log(context, "C_Decrypt() finished");
- 	sc_pkcs11_unlock();
- 	return rv;
- }
-
 diff --git a/src/pkcs11/misc.c b/src/pkcs11/misc.c
-index 5ca1176b1d..1d893d6181 100644
+index 5ca1176b1..2893b2bf3 100644
 --- a/src/pkcs11/misc.c
 +++ b/src/pkcs11/misc.c
-@@ -23,6 +23,7 @@
- #include <stdlib.h>
+@@ -24,6 +24,7 @@
  #include <string.h>
  
-+#include "common/constant-time.h"
  #include "sc-pkcs11.h"
++#include "common/constant-time.h"
  
  #define DUMP_TEMPLATE_MAX	32
+ 
 @@ -174,7 +175,7 @@ CK_RV reset_login_state(struct sc_pkcs11_slot *slot, CK_RV rv)
  			slot->p11card->framework->logout(slot);
  		}
@@ -482,4 +368,50 @@ index 5ca1176b1d..1d893d6181 100644
  			slot->login_user = -1;
  			pop_all_login_states(slot);
  		}
+diff --git a/src/pkcs11/pkcs11-object.c b/src/pkcs11/pkcs11-object.c
+index f04c0b4c5..93cc319c2 100644
+--- a/src/pkcs11/pkcs11-object.c
++++ b/src/pkcs11/pkcs11-object.c
+@@ -1034,7 +1034,7 @@ C_Decrypt(CK_SESSION_HANDLE hSession,	     /* the session's handle */
+ 		rv = reset_login_state(session->slot, rv);
+ 	}
+ 
+-	sc_log(context, "C_Decrypt() = %s", lookup_enum ( RV_T, rv ));
++	sc_log(context, "C_Decrypt()");
+ 	sc_pkcs11_unlock();
+ 	return rv;
+ }
 
+diff --git a/src/libopensc/padding.c b/src/libopensc/padding.c
+index ceb2a1e21..c2cc58d47 100644
+--- a/src/libopensc/padding.c
++++ b/src/libopensc/padding.c
+@@ -192,7 +192,7 @@ int
+ sc_pkcs1_strip_02_padding_constant_time(sc_context_t *ctx, unsigned int n, const u8 *data, unsigned int data_len, u8 *out, unsigned int *out_len)
+ {
+ 	unsigned int i = 0;
+-	u8 *msg = NULL;
++	u8 *msg, *msg_orig = NULL;
+ 	unsigned int good, found_zero_byte, mask;
+ 	unsigned int zero_index = 0, msg_index, mlen = -1, len = 0;
+ 	LOG_FUNC_CALLED(ctx);
+@@ -200,7 +200,7 @@ sc_pkcs1_strip_02_padding_constant_time(sc_context_t *ctx, unsigned int n, const
+ 	if (data == NULL || data_len <= 0 || data_len > n || n < SC_PKCS1_PADDING_MIN_SIZE)
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+ 
+-	msg = calloc(n, sizeof(u8));
++	msg = msg_orig = calloc(n, sizeof(u8));
+ 	if (msg == NULL)
+ 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+ 
+@@ -261,7 +261,7 @@ sc_pkcs1_strip_02_padding_constant_time(sc_context_t *ctx, unsigned int n, const
+ 		out[i] = constant_time_select_8(mask, msg[msg_index], out[i]);
+ 	}
+ 
+-	free(msg);
++	free(msg_orig);
+ 	return constant_time_select(good, mlen, SC_ERROR_WRONG_PADDING);
+ }
+ 
+-- 
+2.43.0

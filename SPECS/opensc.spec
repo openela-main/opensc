@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.20.0
-Release:        8%{?dist}
+Release:        7%{?dist}
 Summary:        Smart card library and applications
 
 Group:          System Environment/Libraries
@@ -79,7 +79,6 @@ Patch21:        %{name}-0.23.0-pin-bypass.patch
 # https://github.com/OpenSC/OpenSC/commit/0f0985f6343eeac4044661d56807ee9286db42c
 Patch22:        %{name}-0.23.0-pkcs15init.patch
 # https://github.com/OpenSC/OpenSC/pull/2948
-# https://github.com/OpenSC/OpenSC/pull/3016
 Patch23:        %{name}-0.23.0-constant-time-pkcs1.patch
 
 BuildRequires:  pcsc-lite-devel
@@ -284,9 +283,6 @@ fi
 
 
 %changelog
-* Thu Feb 08 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.20.0-8
-- Fix CVE-2023-5992: Side-channel leaks while stripping encryption PKCS#1.5 padding
-
 * Thu Nov 30 2023 Jakub Jelen <jjelen@redhat.com> - 0.20.0-7
 - Fix file caching with different offsets (RHEL-4077)
 - Fix CVE-2023-40660: Potential PIN bypass
