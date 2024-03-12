@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.23.0
-Release:        4%{?dist}
+Release:        3%{?dist}
 Summary:        Smart card library and applications
 
 License:        LGPLv2+
@@ -54,7 +54,6 @@ Patch15:        %{name}-0.23.0-pkcs15init.patch
 # https://github.com/OpenSC/OpenSC/commit/f1993dc4e0b33050b8f72a3558ee88b24c4063b2
 Patch16:        %{name}-0.23.0-myeid-sym.patch
 # https://github.com/OpenSC/OpenSC/pull/2948
-# https://github.com/OpenSC/OpenSC/pull/3016
 Patch17:        %{name}-0.23.0-constant-time-pkcs1.5.patch
 
 BuildRequires:  make
@@ -245,9 +244,6 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
-* Thu Feb 08 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-4
-- Fix CVE-2023-5992: Side-channel leaks while stripping encryption PKCS#1.5 padding
-
 * Thu Nov 30 2023 Jakub Jelen <jjelen@redhat.com> - 0.23.0-3
 - Fix file caching with different offsets (RHEL-4079)
 - Fix CVE-2023-40660: Potential PIN bypass
