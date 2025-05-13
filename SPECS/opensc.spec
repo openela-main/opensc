@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.23.0
-Release:        3%{?dist}
+Release:        5%{?dist}
 Summary:        Smart card library and applications
 
 License:        LGPLv2+
@@ -54,7 +54,11 @@ Patch15:        %{name}-0.23.0-pkcs15init.patch
 # https://github.com/OpenSC/OpenSC/commit/f1993dc4e0b33050b8f72a3558ee88b24c4063b2
 Patch16:        %{name}-0.23.0-myeid-sym.patch
 # https://github.com/OpenSC/OpenSC/pull/2948
+# https://github.com/OpenSC/OpenSC/pull/3016
 Patch17:        %{name}-0.23.0-constant-time-pkcs1.5.patch
+# https://github.com/OpenSC/OpenSC/pull/3125
+# https://github.com/OpenSC/OpenSC/pull/3130
+Patch18:        %{name}-0.23.0-pkcs11-uri.patch
 
 BuildRequires:  make
 BuildRequires:  pcsc-lite-devel
@@ -103,6 +107,7 @@ every software/card that does so, too.
 %patch15 -p1 -b .pkcs15init
 %patch16 -p1 -b .myeid-sym
 %patch17 -p1 -b .constant-time-pkcs1
+%patch18 -p1 -b .pkcs11-uri
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -244,6 +249,12 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
+* Thu Oct 24 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-5
+- Add URI in PKCS#11 objects and pkcs11-tool (RHEL-53115)
+
+* Thu Feb 08 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-4
+- Fix CVE-2023-5992: Side-channel leaks while stripping encryption PKCS#1.5 padding
+
 * Thu Nov 30 2023 Jakub Jelen <jjelen@redhat.com> - 0.23.0-3
 - Fix file caching with different offsets (RHEL-4079)
 - Fix CVE-2023-40660: Potential PIN bypass
