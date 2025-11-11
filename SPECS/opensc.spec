@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.23.0
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Smart card library and applications
 
 License:        LGPLv2+
@@ -59,6 +59,9 @@ Patch17:        %{name}-0.23.0-constant-time-pkcs1.5.patch
 # https://github.com/OpenSC/OpenSC/pull/3125
 # https://github.com/OpenSC/OpenSC/pull/3130
 Patch18:        %{name}-0.23.0-pkcs11-uri.patch
+# https://github.com/OpenSC/OpenSC/pull/2756
+Patch19:        %{name}-0.23.0-pkcs11-read-object.patch
+Patch20:        %{name}-0.23.0-generic-genkey.patch
 
 BuildRequires:  make
 BuildRequires:  pcsc-lite-devel
@@ -108,6 +111,8 @@ every software/card that does so, too.
 %patch16 -p1 -b .myeid-sym
 %patch17 -p1 -b .constant-time-pkcs1
 %patch18 -p1 -b .pkcs11-uri
+%patch19 -p1 -b .pkcs11-read-object
+%patch20 -p1 -b .generic-genkey
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -249,6 +254,9 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
+* Thu Jul 21 2025 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-6
+- Fix free before dereference when reading public key (RHEL-96029)
+
 * Thu Oct 24 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-5
 - Add URI in PKCS#11 objects and pkcs11-tool (RHEL-53115)
 

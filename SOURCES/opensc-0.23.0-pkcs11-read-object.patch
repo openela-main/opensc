@@ -1,0 +1,32 @@
+From 63d4bd3d3900682c8d2511e259abec63ce904895 Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Mon, 22 May 2023 14:58:40 +0200
+Subject: [PATCH] pkcs11-tool: Avoid dereferencing freed members when reading
+ public keys
+
+---
+ src/tools/pkcs11-tool.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/tools/pkcs11-tool.c b/src/tools/pkcs11-tool.c
+index 85c500e223..1e9bf4bff5 100644
+--- a/src/tools/pkcs11-tool.c
++++ b/src/tools/pkcs11-tool.c
+@@ -5739,8 +5739,6 @@ static int read_object(CK_SESSION_HANDLE session)
+ 					util_fatal("cannot set OSSL_PARAM");
+ 			}
+ 			OSSL_PARAM_BLD_free(bld);
+-			OSSL_PARAM_free(old);
+-			OSSL_PARAM_free(new);
+ 			if (success)
+ 				ASN1_STRING_free(os);
+ 			free(value);
+@@ -5758,6 +5756,8 @@ static int read_object(CK_SESSION_HANDLE session)
+ 					EVP_PKEY_CTX_free(ctx);
+ 					util_fatal("cannot create EVP_PKEY");
+ 			}
++			OSSL_PARAM_free(old);
++			OSSL_PARAM_free(new);
+ 
+ #endif
+ 			if (!i2d_PUBKEY_bio(pout, pkey))

@@ -1,0 +1,29 @@
+From 6a1ff88d5c45e0b927922928cd947a95caccd4ed Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Thu, 18 May 2023 14:25:56 +0200
+Subject: [PATCH] tests: Fix the secret key test that never worked
+
+---
+ tests/common.sh                       | 6 +++++-
+ tests/test-pkcs11-tool-sign-verify.sh | 6 ++++--
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/tests/common.sh b/tests/common.sh
+index 9466c8fd6d..ba7b797826 100644
+--- a/tests/common.sh
++++ b/tests/common.sh
+@@ -78,8 +78,12 @@ function card_setup() {
+ 	# Generate 521b ECC Key pair
+ 	generate_key "EC:secp521r1" "04" "ECC521"
+ 	# Generate an HMAC:SHA256 key
+-	$PKCS11_TOOL --keypairgen --key-type="GENERIC:64" --login --pin=$PIN \
++	$PKCS11_TOOL --keygen --key-type="GENERIC:64" --login --pin=$PIN \
+ 		--module="$P11LIB" --label="HMAC-SHA256"
++	if [[ "$?" -ne "0" ]]; then
++		echo "Couldn't generate GENERIC key"
++		return 1
++	fi
+ }
+ 
+ function softhsm_cleanup() {
+ 
