@@ -1,0 +1,185 @@
+From 968dc08ee846b483b061fb516bf2d06e99d459a9 Mon Sep 17 00:00:00 2001
+From: Davis Gallinghouse <davis@aramid.us>
+Date: Thu, 21 Nov 2024 10:24:18 -0600
+Subject: [PATCH 1/3] Allocate whole page(s) for each sc_mem_secure_alloc
+
+sc_mem_secure_alloc uses calloc to allocate memory, but then uses
+mlock to try to lock the allocated memory. calloc may not necessarily
+return a page-aligned pointer, even if we request a whole page of
+memory.
+
+Instead of relying on the libc allocator behavior, we directly call
+mmap (VirtualAlloc on Windows) to ensure we get whole page(s) to
+ourselves for sc_mem_secure_alloc.
+
+Fixes #3267
+---
+ src/libopensc/sc.c | 42 ++++++++++++------------------------------
+ 1 file changed, 12 insertions(+), 30 deletions(-)
+
+diff --git a/src/libopensc/sc.c b/src/libopensc/sc.c
+index cf3d86a022..c6c51fe1b9 100644
+--- a/src/libopensc/sc.c
++++ b/src/libopensc/sc.c
+@@ -54,7 +54,6 @@ static const char *sc_version = "(undef)";
+ #define PAGESIZE 0
+ #endif
+ #endif
+-static size_t page_size = PAGESIZE;
+ 
+ const char *sc_get_version(void)
+ {
+@@ -897,40 +896,22 @@ int _sc_parse_atr(sc_reader_t *reader)
+ 	return SC_SUCCESS;
+ }
+ 
+-static void init_page_size()
+-{
+-	if (page_size == 0) {
+-#ifdef _WIN32
+-		SYSTEM_INFO system_info;
+-		GetSystemInfo(&system_info);
+-		page_size = system_info.dwPageSize;
+-#else
+-		page_size = sysconf(_SC_PAGESIZE);
+-		if ((long) page_size < 0) {
+-			page_size = 0;
+-		}
+-#endif
+-	}
+-}
+-
+ void *sc_mem_secure_alloc(size_t len)
+ {
+ 	void *p;
+ 
+-	init_page_size();
+-	if (page_size > 0) {
+-		size_t pages = (len + page_size - 1) / page_size;
+-		len = pages * page_size;
+-	}
+-
+-	p = calloc(1, len);
+-	if (p == NULL) {
+-		return NULL;
+-	}
+ #ifdef _WIN32
+-	VirtualLock(p, len);
++	p = VirtualAlloc(NULL, len, MEM_COMMIT, PAGE_READWRITE);
++	if (p != NULL)
++	{
++		VirtualLock(p, len);
++	}
+ #else
+-	mlock(p, len);
++	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	if (p != NULL)
++	{
++		mlock(p, len);
++	}
+ #endif
+ 
+ 	return p;
+@@ -940,10 +921,11 @@ void sc_mem_secure_free(void *ptr, size_t len)
+ {
+ #ifdef _WIN32
+ 	VirtualUnlock(ptr, len);
++	VirtualFree(ptr, 0, MEM_RELEASE);
+ #else
+ 	munlock(ptr, len);
++	munmap(ptr, len);
+ #endif
+-	free(ptr);
+ }
+ 
+ void sc_mem_clear(void *ptr, size_t len)
+
+From c5037daf2af375177c4a77dafb2b9909ccadf9f5 Mon Sep 17 00:00:00 2001
+From: Davis Gallinghouse <davis@aramid.us>
+Date: Mon, 9 Dec 2024 10:53:15 -0600
+Subject: [PATCH 2/3] Fix code style violations
+
+---
+ src/libopensc/sc.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/src/libopensc/sc.c b/src/libopensc/sc.c
+index c6c51fe1b9..ec03af0b80 100644
+--- a/src/libopensc/sc.c
++++ b/src/libopensc/sc.c
+@@ -902,14 +902,12 @@ void *sc_mem_secure_alloc(size_t len)
+ 
+ #ifdef _WIN32
+ 	p = VirtualAlloc(NULL, len, MEM_COMMIT, PAGE_READWRITE);
+-	if (p != NULL)
+-	{
++	if (p != NULL) {
+ 		VirtualLock(p, len);
+ 	}
+ #else
+ 	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+-	if (p != NULL)
+-	{
++	if (p != NULL) {
+ 		mlock(p, len);
+ 	}
+ #endif
+
+From 137d49d843e3de6794d7df4cc97c59ee517ad44c Mon Sep 17 00:00:00 2001
+From: Frank Morgner <frankmorgner@gmail.com>
+Date: Tue, 3 Dec 2024 22:28:06 +0100
+Subject: [PATCH 3/3] fixed usage of free() on data that was created with
+ sc_mem_secure_alloc
+
+This will crash applications, which, for example are importing a private
+key as reported here
+https://github.com/OpenSC/OpenSC/pull/3269#issuecomment-2495074344
+---
+ src/libopensc/pkcs15.c | 10 ++++------
+ src/libopensc/pkcs15.h |  4 ++++
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/src/libopensc/pkcs15.c b/src/libopensc/pkcs15.c
+index 3f3198d3bc..0876cf8f88 100644
+--- a/src/libopensc/pkcs15.c
++++ b/src/libopensc/pkcs15.c
+@@ -2736,12 +2736,9 @@ sc_pkcs15_make_absolute_path(const struct sc_path *parent, struct sc_path *child
+ 
+ void sc_pkcs15_free_object_content(struct sc_pkcs15_object *obj)
+ {
+-	if (obj->content.value && obj->content.len)   {
+-		if (SC_PKCS15_TYPE_AUTH & obj->type
+-			|| SC_PKCS15_TYPE_SKEY & obj->type
+-			|| SC_PKCS15_TYPE_PRKEY & obj->type) {
+-			/* clean everything that potentially contains a secret */
+-			sc_mem_secure_clear_free(obj->content.value, obj->content.len);
++	if (obj->content.value && obj->content.len) {
++		if (obj->content_free) {
++			obj->content_free(obj->content.value, obj->content.len);
+ 		} else {
+ 			free(obj->content.value);
+ 		}
+@@ -2772,6 +2769,7 @@ sc_pkcs15_allocate_object_content(struct sc_context *ctx, struct sc_pkcs15_objec
+ 			|| SC_PKCS15_TYPE_SKEY & obj->type
+ 			|| SC_PKCS15_TYPE_PRKEY & obj->type) {
+ 		tmp_buf = sc_mem_secure_alloc(len);
++		obj->content_free = sc_mem_secure_free;
+ 	} else {
+ 		tmp_buf = malloc(len);
+ 	}
+diff --git a/src/libopensc/pkcs15.h b/src/libopensc/pkcs15.h
+index ce107c02a0..e4be6f12aa 100644
+--- a/src/libopensc/pkcs15.h
++++ b/src/libopensc/pkcs15.h
+@@ -486,6 +486,10 @@ struct sc_pkcs15_object {
+ 	struct sc_pkcs15_object *next, *prev; /* used only internally */
+ 
+ 	struct sc_pkcs15_der content;
++	/* Method for deallocating the object's content.value.
++	 * If no specific function for deallocation is given, then free() is used
++	 * to release content.value */
++	void (*content_free)(void *, size_t);
+ 
+ 	int session_object;	/* used internally. if nonzero, object is a session object. */
+ };
+

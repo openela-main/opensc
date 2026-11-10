@@ -3,7 +3,7 @@
 
 Name:           opensc
 Version:        0.23.0
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        Smart card library and applications
 
 License:        LGPLv2+
@@ -62,6 +62,8 @@ Patch18:        %{name}-0.23.0-pkcs11-uri.patch
 # https://github.com/OpenSC/OpenSC/pull/2756
 Patch19:        %{name}-0.23.0-pkcs11-read-object.patch
 Patch20:        %{name}-0.23.0-generic-genkey.patch
+# https://github.com/OpenSC/OpenSC/pull/3281
+Patch21:        %{name}-0.23.0-mlock.patch
 
 BuildRequires:  make
 BuildRequires:  pcsc-lite-devel
@@ -113,6 +115,7 @@ every software/card that does so, too.
 %patch18 -p1 -b .pkcs11-uri
 %patch19 -p1 -b .pkcs11-read-object
 %patch20 -p1 -b .generic-genkey
+%patch21 -p1 -b .mlock
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -254,7 +257,10 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
-* Thu Jul 21 2025 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-6
+* Tue May 12 2026 Jakub Jelen <jjelen@redhat.com> - 0.23.0-7
+- Avoid using mlock()/munlock() to unbreak opensc in chromium browsers (RHEL-149712)
+
+* Mon Jul 21 2025 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-6
 - Fix free before dereference when reading public key (RHEL-96029)
 
 * Thu Oct 24 2024 Veronika Hanulikova <vhanulik@redhat.com> - 0.23.0-5
