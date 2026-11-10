@@ -1,5 +1,5 @@
 Name:           opensc
-Version:        0.26.1
+Version:        0.27.1
 Release:        1%{?dist}
 Summary:        Smart card library and applications
 
@@ -10,6 +10,9 @@ Source1:        opensc.module
 Patch1:         opensc-0.19.0-pinpad.patch
 # File caching by default (#2000626)
 Patch8:         %{name}-0.22.0-file-cache.patch
+# Registering SHA1 mechanisms does not work in FIPS mode
+# https://github.com/OpenSC/OpenSC/pull/3645
+Patch9:         opensc-0.27.1-fips-sha1.patch
 
 BuildRequires:  make
 BuildRequires:  pcsc-lite-devel
@@ -60,20 +63,20 @@ OpenSC libraries.
 %setup -q
 %patch 1 -p1 -b .pinpad
 %patch 8 -p1 -b .file-cache
+%patch 9 -p1 -b .fips-sha1
 
 XFAIL_TESTS="test-pkcs11-tool-test-threads.sh test-pkcs11-tool-test.sh"
- 
+
 # In FIPS mode, OpenSSL doesn't allow RSA-PKCS, this is hardcoded into OpenSSL
 # and we cannot influence it. Hence, the test is expected to fail in FIPS mode.
 if [[ -f "/proc/sys/crypto/fips_enabled" && $(cat /proc/sys/crypto/fips_enabled) == "1" ]]; then
 	XFAIL_TESTS+=" test-pkcs11-tool-unwrap-wrap-test.sh"
 fi
- 
+
 sed -i -e "/XFAIL_TESTS/,$ {
   s/XFAIL_TESTS.*/XFAIL_TESTS=$XFAIL_TESTS/
   q
 }" tests/Makefile.am
-
 
 cp -p src/pkcs15init/README ./README.pkcs15init
 cp -p src/scconf/README.scconf .
@@ -201,6 +204,9 @@ rm %{buildroot}%{_mandir}/man1/opensc-notify.1*
 
 
 %changelog
+* Thu Apr 02 2026 Jakub Jelen <jjelen@redhat.com> - 0.27.1-1
+- Rebase to OpenSC 0.27.1 fixing outstanding security reports and bring in new PQC features (RHEL-151598)
+
 * Tue Jan 21 2025 Veronika Hanulikova <vhanulik@redhat.com> - 0.26.1-1
 - Rebase to new upstream release (RHEL-71523)
 - Separate OpenSC into libraries and binaries (RHEL-73314)
